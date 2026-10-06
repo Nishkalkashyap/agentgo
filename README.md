@@ -28,12 +28,15 @@ node dist/cli.js workspace add my-project /absolute/path/to/my-project
 node dist/cli.js start --quick
 ```
 
-`start` prints the MCP URL and a bearer token. Configure your remote client with:
+`start` prints readable connection instructions, including the MCP URL and the exact authentication header to copy. The token is your AgentGo connection password. Configure your remote client with:
 
 ```text
-URL: <mcpConnectionURL from start>
-Authorization: Bearer <token from start>
+MCP URL:      <MCP URL from start>
+Header name:  Authorization
+Header value: Bearer <password from start>
 ```
+
+Include `Bearer ` at the start of the header value. Commands return human-readable output by default; pass `--json` for the structured response used by scripts (the password field is named `token` in JSON).
 
 The daemon runs in the background. Quick Tunnel URLs change after restart/reconnection. For a stable address on a domain you own:
 
