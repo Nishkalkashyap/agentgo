@@ -1,6 +1,6 @@
 {
   "name": "agentgo-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Run Codex and Claude Code on your computer from a remote MCP client",
   "mcpName": "io.github.Nishkalkashyap/agentgo",
   "repository": {
