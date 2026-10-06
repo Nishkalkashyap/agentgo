@@ -2,6 +2,7 @@ import { ManagedProcess, jsonLines } from './process.js';
 import { runCommand } from './commands.js';
 import { AgentError } from './errors.js';
 import type { Config, ModelInfo, Provider, RunEvent, RunResult, StartInput } from './schema.js';
+import { version } from './version.js';
 
 export interface RunContext {
   input: StartInput; cwd: string; nativeId?: string; signal: AbortSignal;
@@ -31,12 +32,12 @@ class CodexConnection {
         else pending.resolve(value.result);
       } else if (value.method && value.id !== undefined) {
         // Auto-review resolves approvals internally. Never silently accept a user prompt.
-        this.notify({ id: value.id, error: { code: -32000, message: 'Unattended auto-approval run cannot answer interactive input.' } });
-        failure(new AgentError('INPUT_REQUIRED', `Codex requested interactive input: ${value.method}`));
+        this.notify({ id: value.id, error: { code: -32000, message: 'This run is unattended and cannot answer questions.' } });
+        failure(new AgentError('INPUT_REQUIRED', `Codex asked for input (${value.method}), which remote runs cannot answer.`));
       } else if (value.method) this.onNotification(value.method, value.params);
     }, failure);
     this.process.on('failure', failure);
-    this.process.on('closed', () => failure(new AgentError('PROCESS_EXITED', 'Codex app-server closed.')));
+    this.process.on('closed', () => failure(new AgentError('PROCESS_EXITED', 'Codex app-server exited.')));
   }
   private rejectAll(error: Error) { for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); } this.pending.clear(); }
   notify(value: unknown) { this.process.write(`${JSON.stringify(value)}\n`); }
@@ -49,7 +50,7 @@ class CodexConnection {
     });
   }
   async initialize() {
-    await this.request('initialize', { clientInfo: { name: 'agentgo', version: '0.1.0' }, capabilities: { experimentalApi: false } });
+    await this.request('initialize', { clientInfo: { name: 'agentgo', version }, capabilities: { experimentalApi: false } });
     this.notify({ method: 'initialized', params: {} });
   }
   async close() { this.onFailure = () => {}; this.rejectAll(new AgentError('CLOSED', 'Connection closed.')); await this.process.stop(); }
@@ -121,7 +122,7 @@ export class CodexProvider implements AgentProvider {
         approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', sandbox: 'workspace-write',
         config: { model_reasoning_effort: input.effort } };
       const started = await rpc.request(context.nativeId ? 'thread/resume' : 'thread/start', { ...options, ...(context.nativeId ? { threadId: context.nativeId } : {}) });
-      if (started.approvalsReviewer !== 'auto_review' || started.approvalPolicy !== 'on-request') throw new AgentError('POLICY_MISMATCH', 'Codex did not accept automatic approval review.');
+      if (started.approvalsReviewer !== 'auto_review' || started.approvalPolicy !== 'on-request') throw new AgentError('POLICY_MISMATCH', 'Codex did not accept automatic approval (auto_review).');
       if (started.sandbox?.type !== 'workspaceWrite') throw new AgentError('POLICY_MISMATCH', 'Codex did not accept the workspace-write sandbox.');
       if (started.model !== input.model || (started.reasoningEffort != null && started.reasoningEffort !== input.effort)) throw new AgentError('CONFIG_MISMATCH', 'Codex changed the requested model or effort.');
       if (input.serviceTier && started.serviceTier !== input.serviceTier) throw new AgentError('CONFIG_MISMATCH', 'Codex changed the requested service tier.');
@@ -143,7 +144,7 @@ export class ClaudeProvider implements AgentProvider {
   async capabilities() {
     const version = (await runCommand(this.config.claudePath, ['--version'])).trim();
     const help = await runCommand(this.config.claudePath, ['--help']);
-    if (!help.includes('--permission-prompts') || !help.includes('"auto"')) throw new AgentError('UNSUPPORTED_CLI', 'Claude CLI must support auto mode and --permission-prompts.');
+    if (!help.includes('--permission-prompts') || !help.includes('"auto"')) throw new AgentError('UNSUPPORTED_CLI', 'This Claude Code version does not support auto mode with --permission-prompts. Update Claude Code.');
     return { provider: 'claude', version, approvalPolicy: 'auto-approval', nativeApprovalMode: 'auto', resume: true, modelDiscovery: 'configured', filesystemIsolation: 'CLI permissions; not an OS sandbox' };
   }
   async models(): Promise<ModelInfo[]> {

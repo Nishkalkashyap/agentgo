@@ -1,7 +1,8 @@
 {
   "name": "agentgo",
   "version": "0.1.0",
-  "description": "Run local Codex and Claude Code from remote MCP clients",
+  "description": "Run Codex and Claude Code on your computer from a remote MCP client",
+  "repository": { "type": "git", "url": "git+https://github.com/Nishkalkashyap/agentgo.git" },
   "type": "module",
   "license": "MIT",
   "engines": { "node": ">=24.13.0" },
@@ -23,5 +24,6 @@
     "@modelcontextprotocol/server": "2.3.1",
     "zod": "4.3.6"
   },
-  "devDependencies": { "@types/node": "^24.0.0", "typescript": "5.9.3" }
+  "devDependencies": { "@types/node": "^24.0.0", "typescript": "5.9.3" },
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "codex", "claude-code", "coding-agent", "cloudflare"]
 }

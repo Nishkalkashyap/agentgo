@@ -1,89 +1,189 @@
 # AgentGo
 
-Run Codex and Claude Code on your computer from a remote MCP client. The local daemon owns the runs, stores their output in SQLite, and exposes short authenticated MCP requests through Cloudflare Tunnel.
+AgentGo lets an AI assistant run Codex and Claude Code on your computer. It's
+an [MCP](https://modelcontextprotocol.io) server: once your MCP client is
+connected to it, the assistant can look around the projects you've allowed,
+hand a coding task to Codex or Claude Code, check on it while it works, and
+read the result.
 
-Both providers always use **automatic approval**:
+AgentGo runs on the computer where your code and your logged-in `codex` and
+`claude` CLIs live, and puts itself behind a Cloudflare tunnel, so the
+assistant can reach it from anywhere: a cloud agent, your phone, or another
+laptop.
 
-- Codex: `approvalPolicy: "on-request"`, `approvalsReviewer: "auto_review"`, workspace-write sandbox.
-- Claude Code: `--permission-mode auto --permission-prompts none`.
+**Read this first.** The agents run as you, with your files, your logins and
+your git credentials, and they approve their own actions. Anyone who has the
+AgentGo password can make them do anything they'd do for you. Only give the
+password to clients you'd trust at your keyboard, and only add projects you'd
+let an agent loose on.
 
-There is no approval-policy tool argument. Native automatic reviewers may reject an action. Interactive questions cannot be answered in v1; unsupported interactive requests fail explicitly. Auto approval does not mean bypassing all permissions.
+## Why I built it
 
-## Requirements
+I got sick of Codex's remote connection and remote device setup. I never got
+it working reliably, and when it did work it was too slow. AgentGo is my
+answer to that.
 
-- macOS or Linux, Node.js **24.13+** (uses built-in `node:sqlite`, currently emitting an experimental warning).
-- A locally installed and logged-in `codex`, `claude`, or both. Verified with Codex **0.160.1** and Claude Code **2.1.291**; incompatible protocol or permission behavior fails rather than falling back to bypass mode.
-- `rg` for glob/search, and `cloudflared` for internet hosting.
-- A remote client supporting MCP over HTTP with a custom Authorization header.
+## What you need
 
-## Setup
+- macOS or Linux, with Node.js 24.13 or newer. AgentGo uses Node's built-in
+  SQLite, which still prints an "experimental" warning.
+- `codex`, `claude`, or both, installed and logged in. AgentGo uses your
+  existing logins and never asks for API keys. It's tested with Codex 0.160.1
+  and Claude Code 2.1.291.
+- [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) on your `PATH`, for
+  the file search tools. On macOS: `brew install ripgrep`.
+- `cloudflared` for the tunnel. If you don't have it, AgentGo can download it
+  for you (see below).
+- An MCP client that supports the Streamable HTTP transport and lets you set
+  an `Authorization` header.
 
-From this checkout:
+## Getting started
+
+Install the CLI and check that everything it needs is there:
 
 ```sh
-npm ci
-npm run build
-node dist/cli.js doctor
-node dist/cli.js workspace add my-project /absolute/path/to/my-project
-node dist/cli.js start --quick
+npm install -g agentgo
+agentgo doctor
 ```
 
-`start` prints readable connection instructions, including the MCP URL and the exact authentication header to copy. The token is your AgentGo connection password. Configure your remote client with:
+`doctor` shows whether `codex`, `claude`, `rg` and `cloudflared` are installed
+and whether you're logged in to each agent.
+
+Next, tell AgentGo which projects agents may work in. Each one gets a short ID
+that the assistant uses to refer to it:
+
+```sh
+agentgo workspace add my-app ~/code/my-app
+```
+
+Then start the server:
+
+```sh
+agentgo start
+```
+
+This starts AgentGo in the background along with a Cloudflare tunnel, then
+prints an MCP URL and the header to send with it:
 
 ```text
-MCP URL:      <MCP URL from start>
-Header name:  Authorization
-Header value: Bearer <password from start>
+MCP URL:       https://<random-words>.trycloudflare.com/mcp
+Header name:   Authorization
+Header value:  Bearer <password>
 ```
 
-Include `Bearer ` at the start of the header value. Commands return human-readable output by default; pass `--json` for the structured response used by scripts (the password field is named `token` in JSON).
+Add both to your MCP client. Include the word `Bearer` and the space after it.
 
-The daemon runs in the background. Quick Tunnel URLs change after restart/reconnection. For a stable address on a domain you own:
+The password is created the first time you run `start` and reused after that.
+Running `start` again while the server is up just prints it again. To replace
+it, run `agentgo token rotate`; the old one stops working straight away.
+
+If `cloudflared` isn't installed, `start` stops and tells you. Install it
+yourself (`brew install cloudflared` on macOS), or run `agentgo start --yes` to
+let AgentGo download the official release from GitHub and check it against its
+published checksum. Pass `--cloudflared <path>` if yours is somewhere unusual.
+
+### Managing the server
 
 ```sh
-node dist/cli.js stop
-node dist/cli.js start --custom-domain-with-cf agents.example.com
+agentgo status
+agentgo stop
+agentgo restart
 ```
 
-The custom-domain command uses cloudflared login if needed, creates/reuses a named tunnel, and adds DNS without overwriting an existing record. An existing dashboard tunnel is also supported:
+Workspaces and settings are read when the server starts, so restart it after
+changing them. Stopping the server interrupts any runs in progress. Edits they
+already made stay, but nothing is undone or resumed automatically.
+
+If the server won't start, its log is at `~/.agentgo/daemon.log`.
+
+Add `--json` to any command if you're calling it from a script. The password
+is in the `token` field.
+
+### A stable address
+
+By default you get a Cloudflare Quick Tunnel. It needs no Cloudflare account,
+but its URL changes every time the tunnel starts or reconnects. If you have a
+domain on Cloudflare, you can use a fixed address instead:
 
 ```sh
-node dist/cli.js start --tunnel-token-file /private/path/tunnel-token \
-  --hostname agents.example.com --port 8765
+agentgo stop
+agentgo start --custom-domain-with-cf agents.example.com
 ```
 
-Configure that dashboard tunnel's origin as `http://127.0.0.1:8765`. Alternatively, `start --local` serves loopback HTTP with no tunnel. If cloudflared is missing, install it yourself or pass `--yes` to approve download of a checksum-verified official release. Use `--no-download` to require an installed binary.
+If `cloudflared` isn't logged in to your Cloudflare account yet, this opens a
+browser so you can log in. AgentGo then creates a tunnel in your account (or
+reuses the one it made before) and adds a DNS record for the hostname. It
+won't overwrite a DNS record that already exists.
+
+If you'd rather manage the tunnel in the Cloudflare dashboard, point its
+public hostname at `http://127.0.0.1:8765`, save the tunnel token to a file,
+and run:
 
 ```sh
-node dist/cli.js status
-node dist/cli.js restart
-node dist/cli.js token rotate
-node dist/cli.js stop
+agentgo start --tunnel-token-file ~/tunnel-token --hostname agents.example.com --port 8765
 ```
 
-Token rotation takes effect on the next HTTP request. `status` does not reveal the token. Workspace and configuration changes require restarting the daemon. Shutdown interrupts active work; it does not undo edits. Tunnel failure only restarts the tunnel, leaving runs alive.
+`start` remembers how it was last started, so later `start` and `restart`
+calls reuse the same tunnel. Pass `--quick` to go back to a Quick Tunnel, or
+`--local` to listen on `127.0.0.1` with no tunnel at all.
 
-Use `--state-dir /private/path` or `AGENTGO_HOME` to select a state directory (default `~/.agentgo`). Give separate instances separate state directories. A runtime lock prevents a daemon and a stdio server from sharing a database. Keep the state directory separate from approved workspaces; overlapping workspace roots are rejected.
+If the tunnel drops, AgentGo reconnects it in the background. Runs in progress
+aren't affected.
 
-## Tools
+### Local only, over stdio
 
-| Tool | Purpose |
+If your MCP client runs on the same computer, it can launch AgentGo directly
+instead:
+
+```json
+{
+  "mcpServers": {
+    "agentgo": {
+      "command": "agentgo",
+      "args": ["stdio"]
+    }
+  }
+}
+```
+
+There's no tunnel or password in this mode. Runs only last as long as the
+client keeps AgentGo open: when the client disconnects, runs in progress are
+interrupted.
+
+The stdio server and the background server can't use the same state directory
+at the same time. Either stop the background server first, or give the stdio
+one its own directory with `"args": ["stdio", "--state-dir", "/path"]` and add
+workspaces to it with the same `--state-dir`.
+
+## What the assistant can do
+
+AgentGo gives the assistant 13 tools.
+
+**Finding its way around.** These read files directly. They don't start an
+agent.
+
+| Tool | What it does |
 | --- | --- |
-| `getAgentCapabilities` | CLI versions, availability, fixed approval behavior |
-| `getSupportedModels` | Per-model efforts and service tiers; refreshable Codex runtime catalog |
-| `listWorkspaces` | Locally registered workspace IDs |
-| `listDirectory` | Paginated directory entries |
-| `readFile` | Bounded text with line selection |
-| `globFiles` | Glob matching over non-ignored files |
-| `grepFiles` | Ripgrep search with file names and line numbers |
-| `startAgentRun` | Start durable background work |
-| `getAgentRunStatus` | State, activity time, configuration, usage and errors |
-| `getAgentRunOutput` | Cursor-based visible messages, tools, changes and final response |
-| `listAgentRuns` | Find tasks across reconnects, with filtering and pagination |
-| `cancelAgentRun` | Request termination of a task and its owned process group |
-| `continueAgentSession` | New task in a previously created provider conversation |
+| `listWorkspaces` | Lists the projects you've added |
+| `listDirectory` | Lists the files and folders in a directory |
+| `readFile` | Reads lines from a text file |
+| `globFiles` | Finds files by name pattern, such as `src/**/*.ts` |
+| `grepFiles` | Searches file contents with ripgrep |
 
-Example MCP arguments:
+**Running agents.**
+
+| Tool | What it does |
+| --- | --- |
+| `getAgentCapabilities` | Shows which agents are installed and their versions |
+| `getSupportedModels` | Lists the models, effort levels and service tiers each agent accepts |
+| `startAgentRun` | Gives Codex or Claude Code a task in a workspace |
+| `getAgentRunStatus` | Checks whether a run is queued, running or finished |
+| `getAgentRunOutput` | Reads what the agent said and did, and its final answer |
+| `listAgentRuns` | Lists past and current runs |
+| `cancelAgentRun` | Stops a run |
+| `continueAgentSession` | Sends a follow-up to a finished run, in the same conversation |
+
+A run started by the assistant looks like this:
 
 ```json
 {
@@ -91,111 +191,155 @@ Example MCP arguments:
   "model": "gpt-6.1-sol",
   "effort": "high",
   "serviceTier": "priority",
-  "workspaceId": "my-project",
-  "cwd": ".",
-  "prompt": "Fix the failing tests and explain your changes.",
-  "idempotencyKey": "task-123",
-  "limits": { "wallTimeSeconds": 1800 }
+  "workspaceId": "my-app",
+  "prompt": "Fix the failing tests and explain what was wrong.",
+  "idempotencyKey": "fix-tests-1"
 }
 ```
 
-Discover current model/effort/tier values first. Model access depends on the installed CLI and account. Unknown combinations fail explicitly. For Claude omit `serviceTier`; Claude fast mode is not treated as Codex priority.
+It returns straight away with a `taskId` and a `sessionId`. The assistant then
+polls `getAgentRunStatus` and reads the result with `getAgentRunOutput`. To
+follow up, it calls `continueAgentSession` with the `sessionId` and a new
+prompt.
 
-Retry the exact same request with the same idempotency key after a connection failure. Reusing a key for different arguments is an error. Keys cover both start and continuation operations and remain reserved after output retention expires.
+A few things worth knowing:
 
-`taskId` identifies one invocation; `sessionId` identifies the conversation. Continue with:
+- **Agents approve their own actions.** Codex runs with its `workspace-write`
+  sandbox and its automatic reviewer (`auto_review`). Claude Code runs in auto
+  mode with permission prompts turned off. Their reviewers can still refuse
+  an action. Nobody is there to answer questions mid-run, so if Codex asks
+  for input, the run fails with `INPUT_REQUIRED`. There's no option to bypass
+  permissions entirely.
+- **The browsing tools are limited; the agents aren't.** `readFile`,
+  `grepFiles` and the rest stay inside the workspace, don't follow symlinks,
+  and refuse secrets such as `.env`, `.ssh`, `.aws`, `.git`, `.npmrc` and
+  private keys. Agents are only held back by their own sandbox and reviewer,
+  so they can read and run whatever those allow.
+- **Models aren't guessed.** The assistant should call `getSupportedModels`
+  first. Codex reports its own list. For Claude, AgentGo starts with the
+  `sonnet` and `opus` aliases at low, medium and high effort; add others with
+  `agentgo model add claude-sonnet-5-5 --efforts low,medium,high,xhigh,max`.
+  An unknown model, effort or tier is an error, never silently swapped. Leave
+  out `serviceTier` for Claude.
+- **One run per workspace at a time.** Runs in the same workspace queue up so
+  two agents never edit the same files at once. Different workspaces run side
+  by side, two at a time by default.
+- **Retries won't start a second run.** Each run carries an `idempotencyKey`.
+  If the assistant retries with the same key and arguments, it gets the
+  original run back. Reusing a key with different arguments is an error.
+- **Runs have a time limit.** 30 minutes unless the assistant asks for longer
+  with `limits.wallTimeSeconds`, up to an hour by default.
+- **`succeeded` means the agent finished.** It doesn't mean the tests pass or
+  the change is right.
+- **The assistant sees what the agent shows.** Run output includes the
+  agent's messages and the tools it used. For Codex it also includes the
+  commands it ran, their output, and the files it changed. Hidden reasoning
+  isn't included.
+  If an agent prints a secret it read, that will be in the output too.
 
-```json
-{
-  "sessionId": "<sessionId from start>",
-  "prompt": "Now add coverage for the bug you fixed.",
-  "idempotencyKey": "task-123-followup"
-}
-```
+## Where AgentGo keeps its state
 
-Continuation preserves provider, model, effort, tier and working directory. It requires the previous task to finish and a native session ID to have been recorded. Independent workspaces can run concurrently; runs within one workspace are serialized to avoid simultaneous edits.
+Everything lives in `~/.agentgo`: your workspaces and settings, the password,
+tunnel settings, run history, the server log, and `cloudflared` if AgentGo
+downloaded it. Use `--state-dir` or the `AGENTGO_HOME` environment variable to
+put it somewhere else. Workspaces can't be inside it, or contain it.
 
-States are `queued`, `starting`, `running`, `succeeded`, `failed`, `cancelled`, `timed_out`, and `interrupted`. `succeeded` means the provider reported successful completion, not that tests or code are necessarily correct. Cancellation is asynchronous: poll until terminal. The last activity time is not a progress percentage.
+Run history is kept for 30 days. After that, prompts and output are deleted,
+but a small record of each run stays so a very late retry still can't start
+it again. Codex and Claude Code keep their own conversation history
+separately, and AgentGo doesn't touch it.
 
-Output is paginated with `nextCursor` and `moreAvailable`. Final output may be truncated and says so. Codex usage is explicitly labeled as session cumulative usage, with the last model-response breakdown when available. Claude usage/cost retains provider-reported semantics. Unknown effective settings remain `null`, distinct from requested values.
+If the server stops unexpectedly, runs that were in progress are marked
+`interrupted` when it next starts. They're never re-run automatically; check
+the workspace for half-finished changes and continue the session yourself if
+you want.
 
-## Model configuration
+Agents don't inherit your whole environment. They get `PATH`, `HOME`, locale,
+proxy settings, and the variables Codex and Claude Code use to log in
+(`OPENAI_*`, `ANTHROPIC_*`, and the AWS, Google and Azure ones). The AgentGo
+password is never passed to them.
 
-Codex discovery uses the installed CLI's app-server catalog and caches it for five minutes. `refresh: true` refreshes it without starting paid inference.
+`agentgo config show` prints the current settings. You can change these in
+`~/.agentgo/config.json`:
 
-Claude's catalog is locally configured and labeled `source: configured`, `availability: unverified`. It starts with the `sonnet` and `opus` CLI aliases and low/medium/high efforts. The actual resolved model is reported when a run starts. Add a model/effort combination supported by your installation:
+| Setting | Default | What it controls |
+| --- | --- | --- |
+| `maxConcurrentRuns` | 2 | Runs that can go at once, across workspaces |
+| `maxQueuedRuns` | 100 | Runs that can wait in the queue |
+| `maxRunSeconds` | 3600 | The longest time limit a run can ask for |
+| `maxRunOutputBytes` | 10 MiB | Output a run can produce before it's stopped |
+| `retentionDays` | 30 | How long prompts and output are kept |
+| `codexPath`, `claudePath`, `rgPath` | `codex`, `claude`, `rg` | Where to find each program |
+
+## Using it as a library
 
 ```sh
-node dist/cli.js model add claude-sonnet-5-5 --efforts low,medium,high,xhigh,max
-node dist/cli.js restart
+npm install agentgo
 ```
 
-`~/.agentgo/config.json` also accepts `codexPath`, `claudePath`, `rgPath`, `maxConcurrentRuns` (default 2), `maxQueuedRuns` (100), `maxRunSeconds` (3600), `maxRunOutputBytes` (10 MiB), and `retentionDays` (30). Use `config show` to inspect defaults. Executable paths and workspace roots are local configuration only, never remote tool inputs.
-
-## Local stdio and TypeScript client
-
-An MCP client on the same machine can launch:
-
-```json
-{
-  "mcpServers": {
-    "local-agents": {
-      "command": "node",
-      "args": ["/absolute/path/to/agentgo/dist/cli.js", "stdio"]
-    }
-  }
-}
-```
-
-Do not run stdio and the HTTP daemon with the same state directory. Stdio EOF interrupts active tasks and closes the service.
+`connectAgent` gives you a typed client for a running AgentGo server:
 
 ```ts
 import { connectAgent } from 'agentgo';
 
-const client = await connectAgent({
+const agent = await connectAgent({
   mcpConnectionURL: process.env.AGENTGO_URL!,
-  token: process.env.AGENTGO_TOKEN!,
+  token: process.env.AGENTGO_PASSWORD!,
 });
+
 try {
-  const models = await client.getSupportedModels('codex');
-  const workspaces = await client.listWorkspaces();
-  // All tools are also available through the typed client.call(name, arguments).
-  const listing = await client.call('listDirectory', {
-    workspaceId: workspaces.workspaces[0]!.id,
-    path: '.',
+  const run = await agent.startAgentRun({
+    provider: 'codex',
+    model: 'gpt-6.1-sol',
+    effort: 'high',
+    workspaceId: 'my-app',
+    prompt: 'Fix the failing tests and explain what was wrong.',
+    idempotencyKey: 'fix-tests-1',
   });
+
+  let status = await agent.getAgentRunStatus(run.taskId);
+  while (status.pollAfterMs) {
+    await new Promise(resolve => setTimeout(resolve, status.pollAfterMs!));
+    status = await agent.getAgentRunStatus(run.taskId);
+  }
+
+  const output = await agent.getAgentRunOutput(run.taskId);
+  console.log(status.status, output.result?.text);
 } finally {
-  await client.close();
+  await agent.close();
 }
 ```
 
-This is a local package, not yet published. `npm pack` creates an installable tarball; install it in your client project to use the package import. The package also exports the service, HTTP/stdio MCP servers, and hosting helpers.
+The URL must be HTTPS, except on `localhost`. Every tool is also available as
+`agent.call(name, args)`. To connect over stdio instead, pass
+`{ transport: new StdioClientTransport({ command: 'agentgo', args: ['stdio'] }) }`,
+importing `StdioClientTransport` from `@modelcontextprotocol/client/stdio`.
 
-## Access and recovery behavior
+The package also exports the pieces the CLI is built from:
 
-The HTTP server binds to loopback. Cloudflared provides public HTTPS; application bearer authentication remains mandatory. Cloudflare carries the traffic. Host/Origin validation, request limits and rate limits apply. Local daemon controls use an owner-only Unix socket that is never routed through the HTTP endpoint.
+- `start`, `stop`, `status` and `restart` do what the commands do.
+  `start({ downloadCloudflared: true })` returns the MCP URL and `token`.
+- `serveAgentStdio({ stateDir })` serves over stdio from your own process.
+- `AgentService.create({ stateDir })` loads the workspaces and run history.
+  `createAgentMcpServer(service)` wraps it in an MCP server you can connect
+  your own transport to, and `createAgentHttpServer({ service, token })` serves
+  it over HTTP on `127.0.0.1` with password checks.
 
-Directory/read/search tools reject traversal, symlink traversal, sensitive credential paths, special files and oversized files. Search respects ignore files, including `.gitignore` outside Git repositories. Searches have explicit file/byte/result limits and report truncation. Directory listing can show a symlink entry but cannot follow it.
+## Working on AgentGo
 
-**Workspace checks constrain direct browsing and initial working directories. They are not a security sandbox for agent shell execution.** Codex retains its workspace-write sandbox plus native automatic approval review; Claude retains its native auto-mode controls. Both run under your local account and use its provider configuration, trusted project instructions, hooks, plugins and tools. Register trusted projects and give the bearer token only to clients authorized to launch coding agents as you. Separate OS identities or containers are needed for hostile users or untrusted repositories.
-
-Hosting credentials are not inherited by agent subprocesses. Only selected shell/provider environment variables are passed. Hidden reasoning and raw provider debug logs are not exposed as run events. Visible agent output can contain information from files it reads; this server does not claim to scrub every possible secret from arbitrary agent output.
-
-Run state and events are durable SQLite records. After a crash, incomplete work becomes `interrupted` and is not replayed automatically. A guardian process terminates the owned process group when the daemon connection disappears. This covers ordinary CLI descendants; a deliberately detached process can escape a process group. Resume a known session explicitly after checking any partial changes.
-
-Old output and prompts expire after `retentionDays`. Compact task/session metadata and idempotency records remain so a late retry cannot repeat work. Native CLI histories have their own retention and are not deleted by this server. Queue and output limits bound concurrent work; exceeding the output limit stops that run with an explicit error.
-
-## Development and verification
+From a clone of this repo:
 
 ```sh
+npm install
 npm test
 npm run typecheck
-npm pack --dry-run
 ```
 
-Tests use fake provider binaries and cover MCP HTTP/stdio, auth, token rotation, filesystem restrictions, session resume, idempotency, cancellation, timeouts, malformed output, daemon recovery and tunnel restart. They do not call paid models or alter Cloudflare configuration.
+`npm test` builds first. The tests use fake `codex`, `claude` and
+`cloudflared` programs, so they don't spend money or touch Cloudflare. They
+need `rg` on your `PATH`.
 
-Opt-in smoke tests:
+There are also smoke tests against the real things:
 
 ```sh
 npm run smoke:providers -- codex
@@ -203,10 +347,15 @@ npm run smoke:providers -- claude
 npm run smoke:tunnel
 ```
 
-Provider smoke tests perform two small real model turns in a temporary workspace, verifying a file edit and session memory. They incur normal provider usage. The tunnel smoke starts a temporary Quick Tunnel and verifies remote authenticated MCP, then stops it. It exposes only an empty temporary workspace and does not run an agent. A named tunnel/DNS setup requires your domain and is not exercised by these tests.
+`smoke:providers` runs two short real turns in a temporary folder, checking
+that the agent can edit a file and remember the conversation. It uses your
+normal Codex or Claude usage. `smoke:tunnel` starts a real Quick Tunnel and
+checks that an authenticated client can reach AgentGo through it, without
+running an agent. Add `-- --yes` to let it download `cloudflared`.
 
-OAuth, interactive steering/approval input, multi-machine routing, worktree orchestration and Windows process supervision are not part of v1.
+Before publishing, `npm pack --dry-run` shows what will go into the package.
 
 ## License
 
-MIT. Cloudflare/storage helpers and portions of HTTP hosting are adapted from PrintGo; see `NOTICE` and `LICENSE`.
+MIT. Parts of the Cloudflare hosting, storage and HTTP code are adapted from
+[PrintGo](https://github.com/Nishkalkashyap/printgo); see `NOTICE`.

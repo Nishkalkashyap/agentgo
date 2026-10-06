@@ -11,7 +11,6 @@ export async function runCommand(file: string, args: string[], timeout = 30_000)
     const result = await execute(file, args, {
       timeout,
       maxBuffer: 4 * 1024 * 1024,
-      windowsHide: true,
       encoding: 'utf8',
       env: { ...agentEnvironment(), LC_ALL: 'C', LANG: 'C' },
     });

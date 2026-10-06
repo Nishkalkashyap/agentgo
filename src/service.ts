@@ -34,12 +34,12 @@ export class AgentService {
     const lock = join(options.stateDir, 'runtime.lock');
     await withLock(options.stateDir, async () => {
       const old = await readJson<{ pid: number; lockId: string }>(join(lock, 'owner.json'));
-      if (old && processExists(old.pid)) throw new AgentError('ALREADY_RUNNING', 'This state directory already has a running service.');
+      if (old && processExists(old.pid)) throw new AgentError('ALREADY_RUNNING', 'Another AgentGo server is already using this state directory.');
       if (old) { await delay(3000); await rm(lock, { recursive: true, force: true }); }
       else {
         try {
           const info = await stat(lock);
-          if (Date.now() - info.mtimeMs < 30_000) throw new AgentError('BUSY', 'A service is acquiring its runtime lock.');
+          if (Date.now() - info.mtimeMs < 30_000) throw new AgentError('BUSY', 'Another AgentGo server is starting in this state directory.');
           await rm(lock, { recursive: true, force: true });
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       }
@@ -61,24 +61,25 @@ export class AgentService {
     return { approvalPolicy: 'auto-approval', providers, maxConcurrentRuns: this.config.maxConcurrentRuns };
   }
   async models(provider: Provider, refresh = false) { return { models: await this.providers[provider].models(refresh) }; }
-  private available() {
-    if (this.closing) throw new AgentError('STOPPING', 'Server is stopping.');
-    if (this.store.active().length >= this.config.maxQueuedRuns + this.config.maxConcurrentRuns) throw new AgentError('QUEUE_FULL', 'Run queue is full.');
+  private available(input: { limits: { wallTimeSeconds: number } }) {
+    if (this.closing) throw new AgentError('STOPPING', 'The server is shutting down.');
+    if (this.store.active().length >= this.config.maxQueuedRuns + this.config.maxConcurrentRuns) throw new AgentError('QUEUE_FULL', 'Too many runs are queued. Wait for some to finish.');
+    if (input.limits.wallTimeSeconds > this.config.maxRunSeconds) throw new AgentError('TIME_LIMIT', `limits.wallTimeSeconds can be at most ${this.config.maxRunSeconds}.`);
   }
   async start(value: unknown, owner = 'owner') {
     const input = startSchema.parse(value);
     const hash = fingerprint({ operation: 'start', input });
     const previous = this.store.previous(owner, input.idempotencyKey, hash);
     if (previous) return this.publicRun(previous);
-    this.available();
-    if (input.limits.wallTimeSeconds > this.config.maxRunSeconds) throw new AgentError('TIME_LIMIT', 'Requested duration exceeds the local maximum.');
+    this.available(input);
     const cwd = await this.files.resolve(input.workspaceId, input.cwd, true);
     const models = await this.providers[input.provider].models();
     const model = models.find(model => model.id === input.model);
-    if (!model) throw new AgentError('UNSUPPORTED_MODEL', 'Model is not advertised/configured. Call getSupportedModels.');
-    if (!model.efforts.includes(input.effort)) throw new AgentError('UNSUPPORTED_EFFORT', 'Effort is not supported for this model.');
-    if (input.serviceTier && !model.serviceTiers.includes(input.serviceTier)) throw new AgentError('UNSUPPORTED_TIER', 'Service tier is not advertised for this model.');
-    this.available();
+    if (!model) throw new AgentError('UNSUPPORTED_MODEL', 'Unknown model. Call getSupportedModels to see which models are available.');
+    if (!model.efforts.includes(input.effort)) throw new AgentError('UNSUPPORTED_EFFORT', `This model supports these efforts: ${model.efforts.join(', ')}.`);
+    if (input.serviceTier && !model.serviceTiers.includes(input.serviceTier)) throw new AgentError('UNSUPPORTED_TIER', model.serviceTiers.length ? `This model supports these service tiers: ${model.serviceTiers.join(', ')}.` : 'This model has no service tiers. Leave serviceTier out.');
+    // The awaits above let other requests in, so check again before queueing.
+    this.available(input);
     const run = this.store.enqueue(owner, input, cwd, hash);
     this.pump();
     return this.publicRun(run);
@@ -88,16 +89,15 @@ export class AgentService {
     const hash = fingerprint({ operation: 'continue', input });
     const previous = this.store.previous(owner, input.idempotencyKey, hash);
     if (previous) return this.publicRun(previous);
-    this.available();
+    this.available(input);
     const session = this.store.session(input.sessionId, owner);
-    if (!session.nativeId) throw new AgentError('SESSION_NOT_READY', 'No native provider session was recorded.');
-    if (this.store.active().some(run => run.sessionId === input.sessionId)) throw new AgentError('SESSION_BUSY', 'Wait for this session’s current task to finish.');
-    if (input.limits.wallTimeSeconds > this.config.maxRunSeconds) throw new AgentError('TIME_LIMIT', 'Requested duration exceeds the local maximum.');
+    if (!session.nativeId) throw new AgentError('SESSION_NOT_READY', 'This session cannot be continued: its first run ended before the agent started a conversation.');
     const startInput: StartInput = { ...session.input, prompt: input.prompt, idempotencyKey: input.idempotencyKey, limits: input.limits };
     const cwd = await this.files.resolve(session.workspaceId, startInput.cwd, true);
-    if (cwd !== session.cwd) throw new AgentError('WORKSPACE_CHANGED', 'Session workspace moved; start a new session.');
-    this.available();
-    if (this.store.active().some(run => run.sessionId === input.sessionId)) throw new AgentError('SESSION_BUSY', 'Session already has an active task.');
+    if (cwd !== session.cwd) throw new AgentError('WORKSPACE_CHANGED', "The session's folder has moved. Start a new run instead.");
+    // The await above lets other requests in, so check again before queueing.
+    this.available(input);
+    if (this.store.active().some(run => run.sessionId === input.sessionId)) throw new AgentError('SESSION_BUSY', 'This session already has a run in progress. Wait for it to finish.');
     const run = this.store.enqueue(owner, startInput, cwd, hash, session);
     this.pump();
     return this.publicRun(run);
@@ -148,7 +148,7 @@ export class AgentService {
     const timeout = setTimeout(() => { run.cancelReason ??= 'timed_out'; controller.abort(); }, run.input.limits.wallTimeSeconds * 1000);
     try {
       const cwd = await this.files.resolve(run.input.workspaceId, run.input.cwd, true);
-      if (cwd !== run.resolvedCwd) throw new AgentError('WORKSPACE_CHANGED', 'Workspace changed after task submission.');
+      if (cwd !== run.resolvedCwd) throw new AgentError('WORKSPACE_CHANGED', 'The working folder changed after the run was queued.');
       const session = this.store.session(run.sessionId, run.owner);
       controller.signal.throwIfAborted();
       run.status = 'running'; this.store.save(run);

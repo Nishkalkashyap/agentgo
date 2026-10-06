@@ -1,4 +1,5 @@
-// Separate guardian: IPC disconnect on daemon death terminates the owned process group.
+// Sits between the server and each agent CLI. If the server dies, the IPC channel
+// disconnects and this kills the CLI's whole process group.
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 let child: ChildProcessWithoutNullStreams | undefined;
 let stopping = false;

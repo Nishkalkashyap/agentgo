@@ -26,13 +26,13 @@ export async function start(options: StartOptions = {}) {
   return withLock(join(directory, 'lifecycle'), async () => {
     const current = await status({ stateDir: directory });
     if (current.status === 'running') return { ...current, token: await readToken(directory), alreadyRunning: true };
-    if (current.status !== 'stopped') throw new AgentError('DAEMON_BUSY', 'Existing daemon is starting or unreachable; inspect status before starting another.');
+    if (current.status !== 'stopped') throw new AgentError('DAEMON_BUSY', 'Another server is starting or not responding. Run status to check on it.');
     const previous = await readJson<StartOptions>(join(directory, 'last-start.json'));
     const tunnelValue = options.tunnel !== undefined ? options.tunnel : previous?.tunnel !== undefined ? previous.tunnel : await readJson<TunnelConfig>(join(directory, 'tunnel.json')) ?? { mode: 'quick' };
     const tunnel = tunnelValue === null ? null : tunnelSchema.parse(tunnelValue);
     const port = options.port ?? previous?.port ?? 0;
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new AgentError('INVALID_PORT', 'Port must be between 0 and 65535.');
-    if (tunnel?.mode === 'token' && !port) throw new AgentError('PORT_REQUIRED', 'Use --port matching the token tunnel dashboard origin.');
+    if (tunnel?.mode === 'token' && !port) throw new AgentError('PORT_REQUIRED', 'Pass --port with the port your dashboard tunnel sends traffic to.');
     const cloudflaredPath = tunnel ? await ensureCloudflared({ ...options, stateDir: directory, cloudflaredPath: options.cloudflaredPath ?? previous?.cloudflaredPath }) : undefined;
     const token = await ensureToken(directory);
     const instanceId = randomUUID();
@@ -50,12 +50,12 @@ export async function start(options: StartOptions = {}) {
     while (Date.now() < deadline) {
       if (error) throw error;
       const state = await readJson<DaemonState>(join(directory, 'daemon.json'));
-      if (state?.instanceId !== instanceId) throw new AgentError('STATE_CONFLICT', 'Daemon identity changed during startup.');
+      if (state?.instanceId !== instanceId) throw new AgentError('STATE_CONFLICT', 'Another start command replaced this server while it was starting.');
       if (state.status === 'running' && state.mcpConnectionURL) return { ...state, token, alreadyRunning: false };
-      if (['failed','stopped'].includes(state.status) || !processExists(state.pid)) throw new AgentError('START_FAILED', `Daemon failed to start. See ${join(directory, 'daemon.log')}.`);
+      if (['failed','stopped'].includes(state.status) || !processExists(state.pid)) throw new AgentError('START_FAILED', `The server failed to start. See ${join(directory, 'daemon.log')}.`);
       await delay(100);
     }
-    throw new AgentError('TUNNEL_NOT_READY', 'Daemon started but the tunnel is not ready. It will keep reconnecting; check status or stop it locally.');
+    throw new AgentError('TUNNEL_NOT_READY', 'The server is running, but the tunnel has not connected yet. It keeps retrying; run status to check on it, or stop to give up.');
   });
 }
 export async function stop(options: { stateDir?: string } = {}) {
@@ -63,15 +63,15 @@ export async function stop(options: { stateDir?: string } = {}) {
   return withLock(join(directory, 'lifecycle'), async () => {
     const current = await status({ stateDir: directory });
     if (current.status === 'stopped') return { status: 'stopped' };
-    if (!('adminSocket' in current)) throw new AgentError('DAEMON_UNREACHABLE', 'Cannot verify daemon identity. Refusing to signal a stale PID.');
+    if (!('adminSocket' in current)) throw new AgentError('DAEMON_UNREACHABLE', 'The server is not responding, so it cannot be stopped safely. Check daemon.log in the state directory, and end the process yourself if needed.');
     const response = await adminRequest(current.adminSocket, '/stop', 'POST');
-    if (response.instanceId !== current.instanceId) throw new AgentError('STATE_CONFLICT', 'Daemon identity changed.');
+    if (response.instanceId !== current.instanceId) throw new AgentError('STATE_CONFLICT', 'Another server replaced this one while it was stopping.');
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
       if ((await status({ stateDir: directory })).status === 'stopped') return { status: 'stopped' };
       await delay(100);
     }
-    throw new AgentError('STOP_TIMEOUT', 'Daemon has not finished stopping. Check status.');
+    throw new AgentError('STOP_TIMEOUT', 'The server is still shutting down. Run status to check on it.');
   });
 }
 export async function restart(options: StartOptions = {}) { await stop(options); return start(options); }

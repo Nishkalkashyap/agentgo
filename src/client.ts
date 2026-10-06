@@ -4,6 +4,7 @@ import { toolSchemas, type ToolName } from './mcp.js';
 import { AgentError } from './errors.js';
 import type { AgentService } from './service.js';
 import type { WorkspaceFiles } from './filesystem.js';
+import { version } from './version.js';
 
 type Results = {
   getAgentCapabilities: Awaited<ReturnType<AgentService['capabilities']>>;
@@ -30,7 +31,7 @@ export class AgentClient {
       if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['127.0.0.1','localhost','[::1]'].includes(url.hostname)))) throw new AgentError('INVALID_URL', 'Use HTTPS, or HTTP on loopback.');
       transport = new StreamableHTTPClientTransport(url, { requestInit: { headers: { Authorization: `Bearer ${options.token}` }, redirect: 'error' } });
     }
-    const client = new Client({ name: 'agentgo-client', version: '0.1.0' }, { versionNegotiation: { mode: 'auto' } });
+    const client = new Client({ name: 'agentgo-client', version }, { versionNegotiation: { mode: 'auto' } });
     try { await client.connect(transport); } catch (error) { await client.close(); throw error; }
     return new AgentClient(client);
   }

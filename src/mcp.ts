@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { AgentService } from './service.js';
 import { startSchema, continueSchema, providerSchema, identifier, pathSchema } from './schema.js';
 import { failureOf } from './errors.js';
+import { version } from './version.js';
 
 export const toolSchemas = {
   getAgentCapabilities: z.object({ provider: providerSchema.optional() }).strict(),
@@ -21,7 +22,7 @@ export const toolSchemas = {
 };
 export type ToolName = keyof typeof toolSchemas;
 export function createAgentMcpServer(service: AgentService, owner = 'owner') {
-  const mcp = new McpServer({ name: 'agentgo', version: '0.1.0' }, { supportedProtocolVersions: ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'] });
+  const mcp = new McpServer({ name: 'agentgo', version }, { supportedProtocolVersions: ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'] });
   const handlers: Record<ToolName, (input: any) => unknown> = {
     getAgentCapabilities: a => service.capabilities(a.provider),
     getSupportedModels: a => service.models(a.provider, a.refresh),
@@ -38,19 +39,19 @@ export function createAgentMcpServer(service: AgentService, owner = 'owner') {
     cancelAgentRun: a => service.cancel(a.taskId, owner),
   };
   const descriptions: Record<ToolName, string> = {
-    getAgentCapabilities: 'Inspect local CLI availability and the fixed auto-approval mode.',
-    getSupportedModels: 'Discover model-specific effort and service-tier values. Configured catalogs do not guarantee account access.',
-    listWorkspaces: 'List workspace IDs registered locally by the owner.',
-    listDirectory: 'List one directory inside an approved workspace; paginate with the returned cursor.',
-    readFile: 'Read bounded UTF-8 text from a workspace file. Sensitive paths and symlinks are denied.',
-    globFiles: 'Find files using a glob; respects ignore files and excludes sensitive paths.',
-    grepFiles: 'Search bounded workspace text using ripgrep, with line numbers. Check truncated in the result.',
-    startAgentRun: 'Queue local CLI work with automatic approval. Reuse identical arguments and idempotencyKey on retries. Poll status/output with the returned taskId.',
-    continueAgentSession: 'Continue a finished conversation with a new task. Uses the original provider, workspace and model configuration.',
-    getAgentRunStatus: 'Read task state, activity and errors. CLI completion does not certify correctness.',
-    getAgentRunOutput: 'Read visible messages and tool activity after a cursor; includes final output when available.',
-    listAgentRuns: 'List persisted tasks, optionally filtered by workspace and state.',
-    cancelAgentRun: 'Request termination of an owned task. Does not undo completed edits or external effects.',
+    getAgentCapabilities: 'Show which coding agents (codex, claude) are installed on this computer, their versions, and how they approve their own actions.',
+    getSupportedModels: 'List the models you can pass to startAgentRun, with the effort and serviceTier values each accepts. Codex reports its list live; the Claude list is set by the owner and may include models their account cannot use.',
+    listWorkspaces: 'List the project folders the owner has allowed agents to work in. Use an id as workspaceId in other tools.',
+    listDirectory: 'List the files and folders at one path in a workspace. If nextCursor is set, pass it back as cursor for the next page.',
+    readFile: 'Read lines from a UTF-8 text file in a workspace (files up to 1 MiB). Secrets such as .env files and private keys, and symlinks, are blocked.',
+    globFiles: 'Find workspace files whose paths match a glob such as src/**/*.ts. Files ignored by .gitignore and secrets are skipped.',
+    grepFiles: 'Search workspace files with ripgrep and return matching lines with line numbers. If truncated is true, narrow the search.',
+    startAgentRun: 'Start Codex or Claude Code on a task in a workspace. It runs in the background and approves its own actions. Returns a taskId to poll with getAgentRunStatus and getAgentRunOutput. If this call fails, retry with the same arguments and idempotencyKey; that never starts a second run.',
+    continueAgentSession: 'Send a follow-up prompt to the conversation of a finished run, using its sessionId. Keeps the same agent, model, workspace and folder. Returns a new taskId.',
+    getAgentRunStatus: "Get a run's state, timing, token usage and error. succeeded means the agent finished, not that its work is correct.",
+    getAgentRunOutput: "Read a run's messages, commands, tool calls and file changes after cursor, plus the final response once it has finished.",
+    listAgentRuns: 'List runs, optionally filtered by workspace and status.',
+    cancelAgentRun: 'Stop a queued or running run. Changes it already made are not undone.',
   };
   for (const name of Object.keys(toolSchemas) as ToolName[]) {
     const mutation = ['startAgentRun', 'continueAgentSession', 'cancelAgentRun'].includes(name);

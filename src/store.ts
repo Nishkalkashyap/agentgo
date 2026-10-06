@@ -79,7 +79,7 @@ export class RunStore {
     let data = JSON.stringify(event);
     if (Buffer.byteLength(data) > 16000) data = JSON.stringify({ type: event.type, data: { truncated: true, preview: data.slice(0, 3000) } });
     const bytes = Buffer.byteLength(data);
-    if (run.outputBytes + bytes > maxBytes) throw new AgentError('OUTPUT_LIMIT', 'Run exceeded the locally configured output limit.');
+    if (run.outputBytes + bytes > maxBytes) throw new AgentError('OUTPUT_LIMIT', `The run produced more than ${maxBytes} bytes of output (maxRunOutputBytes) and was stopped.`);
     this.transaction(() => {
       this.db.prepare('INSERT INTO events(task_id,created_at,data) VALUES(?,?,?)').run(run.taskId, new Date().toISOString(), data);
       run.outputBytes += bytes;
@@ -98,7 +98,7 @@ export class RunStore {
     return { events, nextCursor: events.at(-1)?.cursor ?? cursor, moreAvailable: rows.length > events.length };
   }
   recover() {
-    for (const run of this.active()) { run.status = 'interrupted'; run.finishedAt = new Date().toISOString(); run.error = { code: 'DAEMON_RESTARTED', message: 'Daemon stopped before recording completion; work was not replayed.' }; this.save(run); }
+    for (const run of this.active()) { run.status = 'interrupted'; run.finishedAt = new Date().toISOString(); run.error = { code: 'DAEMON_RESTARTED', message: 'The server stopped while this run was in progress. It was not restarted; check the workspace for partial changes.' }; this.save(run); }
   }
   prune(days: number) {
     const cutoff = new Date(Date.now() - days * 86400_000).toISOString();

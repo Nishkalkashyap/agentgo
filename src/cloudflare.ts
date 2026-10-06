@@ -27,7 +27,7 @@ export async function ensureCloudflared(options: CloudflaredOptions = {}): Promi
     return options.cloudflaredPath;
   }
   const directory = join(stateDirectory(options.stateDir), 'bin');
-  const executable = join(directory, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared');
+  const executable = join(directory, 'cloudflared');
   for (const candidate of ['cloudflared', executable]) {
     try {
       await runCommand(candidate, ['--version']);
@@ -37,40 +37,39 @@ export async function ensureCloudflared(options: CloudflaredOptions = {}): Promi
     }
   }
   if (options.downloadCloudflared === false) {
-    throw new AgentError('MISSING_DEPENDENCY', 'cloudflared is required and downloads are disabled. Install it manually or supply --cloudflared /path/to/cloudflared.');
+    throw new AgentError('MISSING_DEPENDENCY', 'cloudflared is not installed and downloads are turned off. Install it, or point --cloudflared at it.');
   }
   const architectures: Record<string, string> = { x64: 'amd64', arm64: 'arm64', ia32: '386', arm: 'arm' };
-  const platforms: Record<string, string> = { darwin: 'darwin', linux: 'linux', win32: 'windows' };
+  const platforms: Record<string, string> = { darwin: 'darwin', linux: 'linux' };
   const architecture = architectures[process.arch];
   const platform = platforms[process.platform];
-  if (!architecture || !platform) throw new AgentError('UNSUPPORTED_PLATFORM', 'Install cloudflared manually for this platform.');
+  if (!architecture || !platform) throw new AgentError('UNSUPPORTED_PLATFORM', 'There is no cloudflared download for this platform. Install it yourself.');
   if (options.downloadCloudflared !== true) {
     if (!options.confirmCloudflaredDownload) {
-      throw new AgentError('DOWNLOAD_CONFIRMATION_REQUIRED', 'cloudflared is required. Approve its download with downloadCloudflared: true or confirmCloudflaredDownload, or install it manually.');
+      throw new AgentError('DOWNLOAD_CONFIRMATION_REQUIRED', 'cloudflared is not installed. Install it, or pass --yes (downloadCloudflared: true in code) to download it.');
     }
     if (!await options.confirmCloudflaredDownload()) {
-      throw new AgentError('DOWNLOAD_CANCELLED', 'cloudflared installation cancelled. No tunnel was started.');
+      throw new AgentError('DOWNLOAD_CANCELLED', 'cloudflared download cancelled. No tunnel was started.');
     }
   }
-  const suffix = { darwin: '.tgz', windows: '.exe' }[platform] ?? '';
-  const name = `cloudflared-${platform}-${architecture}${suffix}`;
+  const name = `cloudflared-${platform}-${architecture}${platform === 'darwin' ? '.tgz' : ''}`;
   await privateDirectory(directory);
   // Lifecycle start/setup callers hold the lock while installing.
   const releaseResponse = await fetch('https://api.github.com/repos/cloudflare/cloudflared/releases/latest', {
     headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'agentgo' },
     signal: AbortSignal.timeout(30_000),
   });
-  if (!releaseResponse.ok) throw new AgentError('DOWNLOAD_FAILED', `GitHub release lookup failed (${releaseResponse.status}). Install cloudflared manually.`);
+  if (!releaseResponse.ok) throw new AgentError('DOWNLOAD_FAILED', `Could not look up the latest cloudflared release (HTTP ${releaseResponse.status}). Install cloudflared yourself.`);
   const release = await releaseResponse.json() as { assets: ReleaseAsset[] };
   const asset = release.assets.find(asset => asset.name === name);
   if (!asset || !asset.digest?.match(/^sha256:[a-f0-9]{64}$/)) {
-    throw new AgentError('DOWNLOAD_FAILED', `No verified ${name} release is available. Install cloudflared manually.`);
+    throw new AgentError('DOWNLOAD_FAILED', `The latest cloudflared release has no checksummed ${name}. Install cloudflared yourself.`);
   }
   const response = await fetch(asset.browser_download_url, { signal: AbortSignal.timeout(120_000) });
-  if (!response.ok) throw new AgentError('DOWNLOAD_FAILED', `cloudflared download failed (${response.status}).`);
+  if (!response.ok) throw new AgentError('DOWNLOAD_FAILED', `cloudflared download failed (HTTP ${response.status}).`);
   const data = Buffer.from(await response.arrayBuffer());
   if (`sha256:${createHash('sha256').update(data).digest('hex')}` !== asset.digest) {
-    throw new AgentError('INTEGRITY_FAILED', 'cloudflared checksum mismatch.');
+    throw new AgentError('INTEGRITY_FAILED', 'The downloaded cloudflared does not match its published checksum.');
   }
   const temporary = await mkdtemp(join(directory, 'download-'));
   try {
@@ -87,7 +86,7 @@ export async function ensureCloudflared(options: CloudflaredOptions = {}): Promi
 
 async function interactiveLogin(binary: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(binary, ['tunnel', 'login'], { stdio: ['inherit', 2, 2], windowsHide: true });
+    const child = spawn(binary, ['tunnel', 'login'], { stdio: ['inherit', 2, 2] });
     child.once('error', reject);
     child.once('exit', code => code === 0 ? resolve() : reject(new AgentError('CLOUDFLARE_LOGIN_FAILED', `Cloudflare login exited with code ${code}.`)));
   });
@@ -120,7 +119,7 @@ export async function configureCloudflare(options: NamedTunnelOptions): Promise<
       try { await access(credentialsFile); }
       catch { credentialsFile = join(homedir(), '.cloudflared', `${id}.json`); }
       try { await access(credentialsFile); }
-      catch { throw new AgentError('CREDENTIALS_REQUIRED', 'This tunnel exists but its credentials are not on this computer. Supply a credentials file or a tunnel token file.'); }
+      catch { throw new AgentError('CREDENTIALS_REQUIRED', `The tunnel ${name} already exists, but its credentials are not on this computer. Create a token for it in the Cloudflare dashboard and use --tunnel-token-file.`); }
     } else {
       try {
         await runCommand(binary, ['tunnel', 'create', '--credentials-file', pending, name]);
@@ -153,7 +152,7 @@ export async function tunnelArguments(config: TunnelConfig, directory: string, l
     return [...args, 'run', '--token-file', config.tokenFile];
   }
   const credentials = JSON.parse(await readFile(config.credentialsFile, 'utf8')) as { TunnelID: string };
-  if (credentials.TunnelID !== config.tunnelId) throw new AgentError('INVALID_TUNNEL', 'Credentials file does not belong to the selected tunnel UUID.');
+  if (credentials.TunnelID !== config.tunnelId) throw new AgentError('INVALID_TUNNEL', 'The credentials file belongs to a different tunnel.');
   // JSON is a valid YAML subset and safely encodes paths and hostnames.
   await writeJson(configuration, {
     tunnel: config.tunnelId,
