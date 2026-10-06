@@ -1,16 +1,37 @@
 {
   "name": "agentgo-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Run Codex and Claude Code on your computer from a remote MCP client",
   "mcpName": "io.github.Nishkalkashyap/agentgo",
-  "repository": { "type": "git", "url": "git+https://github.com/Nishkalkashyap/agentgo.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nishkalkashyap/agentgo.git"
+  },
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=24.13.0" },
-  "os": ["darwin", "linux"],
-  "bin": { "agentgo": "dist/cli.js", "agentgo-mcp": "dist/cli.js" },
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "files": ["dist", "README.md", "LICENSE", "NOTICE"],
+  "engines": {
+    "node": ">=24.13.0"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "bin": {
+    "agentgo": "dist/cli.js",
+    "agentgo-mcp": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -25,6 +46,17 @@
     "@modelcontextprotocol/server": "2.3.1",
     "zod": "4.3.6"
   },
-  "devDependencies": { "@types/node": "^24.0.0", "typescript": "5.9.3" },
-  "keywords": ["mcp", "mcp-server", "model-context-protocol", "codex", "claude-code", "coding-agent", "cloudflare"]
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "5.9.3"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "codex",
+    "claude-code",
+    "coding-agent",
+    "cloudflare"
+  ]
 }
