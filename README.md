@@ -376,7 +376,33 @@ normal Codex or Claude usage. `smoke:tunnel` starts a real Quick Tunnel and
 checks that an authenticated client can reach AgentGo through it, without
 running an agent. Add `-- --yes` to let it download `cloudflared`.
 
-Before publishing, `npm pack --dry-run` shows what will go into the package.
+### Publishing a release
+
+AgentGo is published to npm as `agentgo-mcp` and listed in the
+[MCP Registry](https://registry.modelcontextprotocol.io) through `server.json`.
+You'll need to be logged in to npm (`npm login`) and to the registry
+(`mcp-publisher login github`, using the official
+[`mcp-publisher`](https://github.com/modelcontextprotocol/registry) CLI).
+
+First set both `version` fields in `server.json` to the version you're about
+to release. Then, from the repo root:
+
+```sh
+git add -A && git commit -m "Describe the release"
+npm version minor          # or patch; must match the version in server.json
+git push --follow-tags
+npm publish
+npm view agentgo-mcp@<version> version   # wait until this shows up
+mcp-publisher publish
+```
+
+`npm pack --dry-run` shows what will go into the package before you publish.
+`npm publish` builds the package first.
+
+After `npm publish` succeeds, npm can take a few minutes to list the new
+version. Don't publish again while you wait; npm rejects a second upload of
+the same version. `mcp-publisher publish` fails with "version not found" if
+you run it before the version shows up, so wait for `npm view` to show it.
 
 ## Codex and Claude Code terms
 
