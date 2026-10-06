@@ -358,6 +358,19 @@ running an agent. Add `-- --yes` to let it download `cloudflared`.
 
 Before publishing, `npm pack --dry-run` shows what will go into the package.
 
+## Codex and Claude Code terms
+
+AgentGo isn't made by or affiliated with OpenAI or Anthropic. It runs the
+`codex` and `claude` programs you installed, unmodified, and they use the
+sign-in you already set up. AgentGo never handles or stores those logins.
+
+Your OpenAI and Anthropic terms still apply to everything the agents do, so:
+
+- **Keep it for yourself.** Giving someone else your AgentGo password lets
+  them use your Codex and Claude accounts, which both companies' terms forbid.
+- **Subscriptions are for ordinary, individual use.** If you're going to run
+  agents heavily or unattended, sign the CLIs in with an API key instead.
+
 ## License
 
 MIT. Parts of the Cloudflare hosting, storage and HTTP code are adapted from
