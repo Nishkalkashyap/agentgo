@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { basename, relative, resolve } from 'node:path';
+import { basename, relative, resolve, sep } from 'node:path';
 import { realpath } from 'node:fs/promises';
 import { privateDirectory, stateDirectory, withLock } from './storage.js';
 import { loadConfig, saveConfig, rotateToken } from './config.js';
@@ -19,7 +19,10 @@ let jsonOutput = process.argv.slice(2).includes('--json');
 const entry = process.argv[1];
 const relativeEntry = entry ? relative(process.cwd(), entry) : '';
 const shellQuote = (value: string) => /^[\w./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
-const executable = entry && basename(entry) === 'cli.js' ? `node ${shellQuote(relativeEntry)}` : 'agentgo';
+// Suggest `node dist/cli.js` only in a source checkout. Installed copies live under node_modules,
+// and some launchers (pnpm's, for one) run cli.js by its full path rather than through a symlink.
+const fromSource = entry && basename(entry) === 'cli.js' && !entry.split(sep).includes('node_modules');
+const executable = fromSource ? `node ${shellQuote(relativeEntry)}` : 'agentgo';
 
 const help = `Usage: agentgo <command> [options]
 
