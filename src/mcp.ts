@@ -41,12 +41,12 @@ export function createAgentMcpServer(service: AgentService, owner = 'owner') {
   const descriptions: Record<ToolName, string> = {
     getAgentCapabilities: 'Show which coding agents (codex, claude) are installed on this computer, their versions, and how they approve their own actions.',
     getSupportedModels: 'List the models you can pass to startAgentRun, with the effort and serviceTier values each accepts. Codex reports its list live; the Claude list is set by the owner and may include models their account cannot use.',
-    listWorkspaces: 'List the project folders the owner has allowed agents to work in. Use an id as workspaceId in other tools.',
+    listWorkspaces: 'List the projects the owner has allowed agents to work in. Use an id as workspaceId in other tools. Only the owner can add projects, by running agentgo on their computer; if the list is empty, the result says how.',
     listDirectory: 'List the files and folders at one path in a workspace. If nextCursor is set, pass it back as cursor for the next page.',
     readFile: 'Read lines from a UTF-8 text file in a workspace (files up to 1 MiB). Secrets such as .env files and private keys, and symlinks, are blocked.',
-    globFiles: 'Find workspace files whose paths match a glob such as src/**/*.ts. Files ignored by .gitignore and secrets are skipped.',
-    grepFiles: 'Search workspace files with ripgrep and return matching lines with line numbers. If truncated is true, narrow the search.',
-    startAgentRun: 'Start Codex or Claude Code on a task in a workspace. It runs in the background and approves its own actions. Returns a taskId to poll with getAgentRunStatus and getAgentRunOutput. If this call fails, retry with the same arguments and idempotencyKey; that never starts a second run.',
+    globFiles: 'Find workspace files whose paths match a glob such as src/**/*.ts. Skips files ignored by .gitignore, dependency and build folders such as node_modules and dist, and secrets.',
+    grepFiles: 'Search workspace files with ripgrep and return matching lines with line numbers. Skips the same files as globFiles. If truncated is true, narrow the search.',
+    startAgentRun: 'Start Codex or Claude Code on a task in a workspace. It runs in the background and approves its own actions. Several runs can work at once, even in the same workspace, so give parallel runs separate parts of the code. Returns a taskId to poll with getAgentRunStatus and getAgentRunOutput. If this call fails, retry with the same arguments and idempotencyKey; that never starts a second run.',
     continueAgentSession: 'Send a follow-up prompt to the conversation of a finished run, using its sessionId. Keeps the same agent, model, workspace and folder. Returns a new taskId.',
     getAgentRunStatus: "Get a run's state, timing, token usage and error. succeeded means the agent finished, not that its work is correct.",
     getAgentRunOutput: "Read a run's messages, commands, tool calls and file changes after cursor, plus the final response once it has finished.",
@@ -58,6 +58,7 @@ export function createAgentMcpServer(service: AgentService, owner = 'owner') {
     mcp.registerTool(name, { description: descriptions[name], inputSchema: toolSchemas[name] as z.ZodObject<any>,
       annotations: { readOnlyHint: !mutation, destructiveHint: mutation, idempotentHint: true, openWorldHint: mutation } }, async input => {
       try {
+        await service.refresh();
         const result = await handlers[name](toolSchemas[name].parse(input)) as Record<string, unknown>;
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result };
       } catch (error) { return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(failureOf(error)) }] }; }

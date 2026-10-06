@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { basename, relative, resolve } from 'node:path';
-import { stateDirectory, withLock } from './storage.js';
+import { realpath } from 'node:fs/promises';
+import { privateDirectory, stateDirectory, withLock } from './storage.js';
 import { loadConfig, saveConfig, rotateToken } from './config.js';
-import { identifier, modelSchema } from './schema.js';
+import { identifier, modelSchema, type Config } from './schema.js';
+import { WorkspaceFiles } from './filesystem.js';
 import { start, stop, restart, status, configureCloudflare } from './hosting.js';
 import { createProviders } from './providers.js';
 import { runCommand } from './commands.js';
@@ -25,9 +27,10 @@ Run Codex and Claude Code on this computer from a remote MCP client.
 
 Setup:
   doctor                           Check that codex, claude, rg and cloudflared are ready
-  workspace add <id> <path>        Let agents work in a project folder
-  workspace remove <id>            Stop agents working in a project folder
-  workspace list                   List project folders
+  workspace add-folder <path>      Let agents work in every project inside a folder, e.g. ~/code
+  workspace add <id> <path>        Let agents work in one project
+  workspace remove <id|path>       Remove a project or a folder of projects
+  workspace list                   List the projects agents can work in
   model add <id> --efforts <list>  Add a Claude model, e.g. --efforts low,medium,high
   config show                      Show the current settings
 
@@ -56,8 +59,15 @@ Other options:
   -h, --help                       Show this help
   -v, --version                    Show the version
 
-Restart the server after changing workspaces or models.
+Changes to workspaces, models and settings apply straight away; no restart needed.
 `;
+async function findWorkspaces(directory: string, config: Config) {
+  await privateDirectory(directory);
+  const files = new WorkspaceFiles(config, directory);
+  await files.prepare();
+  return files.all();
+}
+
 async function main() {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     'state-dir': { type: 'string' }, quick: { type: 'boolean' }, local: { type: 'boolean' }, 'custom-domain-with-cf': { type: 'string' },
@@ -80,18 +90,36 @@ async function main() {
   }
   if (command === 'workspace') {
     if (action === 'list') {
-      const { workspaces } = await loadConfig(directory);
-      return output({ workspaces }, formatWorkspaces(workspaces));
+      const config = await loadConfig(directory);
+      const found = await findWorkspaces(directory, config);
+      return output({ folders: config.folders, workspaces: found }, formatWorkspaces(config.folders, found, invocation));
     }
-    if (!id || !['add','remove'].includes(action ?? '') || (action === 'add' && !path)) throw new AgentError('USAGE', 'Use workspace add <id> <path>, workspace remove <id> or workspace list.');
-    identifier.parse(id);
+    const target = id;
+    if (!target || !['add-folder', 'add', 'remove'].includes(action ?? '') || (action === 'add' && !path)) {
+      throw new AgentError('USAGE', 'Use workspace add-folder <path>, workspace add <id> <path>, workspace remove <id|path> or workspace list.');
+    }
     return withLock(directory, async () => {
       const config = await loadConfig(directory);
-      config.workspaces = config.workspaces.filter(workspace => workspace.id !== id);
-      if (action === 'add') config.workspaces.push({ id, path: resolve(path!) });
+      if (action === 'add-folder') config.folders = [...config.folders, resolve(target)];
+      if (action === 'add') {
+        identifier.parse(target);
+        config.workspaces = [...config.workspaces.filter(workspace => workspace.id !== target), { id: target, path: resolve(path!) }];
+      }
+      if (action === 'remove') {
+        const full = await realpath(resolve(target)).catch(() => resolve(target));
+        const before = config.workspaces.length + config.folders.length;
+        config.workspaces = config.workspaces.filter(workspace => workspace.id !== target && workspace.path !== full);
+        config.folders = config.folders.filter(folder => folder !== full);
+        if (config.workspaces.length + config.folders.length === before) {
+          throw new AgentError('NOT_FOUND', `No workspace or folder matches ${target}. Run workspace list to see them.`);
+        }
+      }
+      // Adding the same folder twice is harmless; keep one copy.
+      config.folders = [...new Set(config.folders)];
       await saveConfig(directory, config);
-      const message = 'Restart the server to apply this change.';
-      output({ workspaces: config.workspaces, message }, formatWorkspaces(config.workspaces, message));
+      const saved = await loadConfig(directory);
+      const found = await findWorkspaces(directory, saved);
+      output({ folders: saved.folders, workspaces: found }, formatWorkspaces(saved.folders, found, invocation));
     });
   }
   if (command === 'model') {
@@ -106,7 +134,7 @@ async function main() {
   }
   if (command === 'config' && action === 'show') {
     const config = await loadConfig(directory);
-    return output(config, formatConfig(config));
+    return output(config, formatConfig(config, await findWorkspaces(directory, config), invocation));
   }
   if (command === 'token' && action === 'rotate') return withLock(directory, async () => {
     const token = await rotateToken(directory);
@@ -132,7 +160,8 @@ async function main() {
         return { dependency: name, version: (await runCommand(name === 'rg' ? config.rgPath : values.cloudflared ?? 'cloudflared', ['--version'])).split('\n')[0], available: true };
       } catch (error) { return { dependency: name, available: false, error: failureOf(error) }; }
     }));
-    return output({ checks, workspaces: config.workspaces.length, stateDir: directory, approvalPolicy: 'auto-approval' }, formatDoctor(checks, config.workspaces.length, directory));
+    const workspaces = (await findWorkspaces(directory, config)).length;
+    return output({ checks, workspaces, stateDir: directory, approvalPolicy: 'auto-approval' }, formatDoctor(checks, workspaces, directory, invocation));
   }
   if (command === 'status') {
     const result = await status({ stateDir: directory });
@@ -151,7 +180,8 @@ async function main() {
       options.tunnel = { mode: 'token', hostname: values.hostname, tokenFile: resolve(values['tunnel-token-file']) };
     }
     const result = await (command === 'restart' ? restart : start)(options);
-    return output(result, formatConnection(result, invocation));
+    const workspaces = (await findWorkspaces(directory, await loadConfig(directory))).length;
+    return output(result, formatConnection(result, invocation, workspaces));
   }
   throw new AgentError('USAGE', 'Unknown command. Run agentgo --help.');
 }

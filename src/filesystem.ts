@@ -1,40 +1,74 @@
 import { constants, type Dirent } from 'node:fs';
 import { open, realpath, lstat, readdir } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, matchesGlob } from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { contains } from './config.js';
 import { AgentError } from './errors.js';
 import type { Config } from './schema.js';
 import { agentEnvironment } from './process.js';
 
+const SEARCH_FILE_LIMIT = 100_000;
+const SEARCH_TIMEOUT_MS = 10_000;
 const forbidden = (path: string) => path.split(/[\\/]/).some(part => /^(\.git|\.ssh|\.aws|\.gnupg|\.codex|\.claude|\.agentgo|\.env(?:\..*)?|\.npmrc|\.netrc|id_rsa|id_ed25519)$/i.test(part) || /\.(pem|key|p12|pfx)$/i.test(part));
-function execute(binary: string, args: string[], cwd: string, stdin?: string): Promise<string> {
+// The same names as forbidden(), so ripgrep never opens them in the first place.
+const secretGlobs = ['.git', '.ssh', '.aws', '.gnupg', '.codex', '.claude', '.agentgo', '.env', '.env.*', '.npmrc', '.netrc', 'id_rsa', 'id_ed25519', '*.pem', '*.key', '*.p12', '*.pfx'];
+export const workspacesHint = 'No workspaces yet. Ask the owner to run "agentgo workspace add-folder <folder>" on their computer, for example "agentgo workspace add-folder ~/code". Every project inside that folder becomes a workspace, and no restart is needed.';
+// Folder names become workspace IDs: "My App" becomes "My-App".
+const folderId = (name: string) => name.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^[^a-zA-Z0-9]+/, '').slice(0, 100);
+const byName = (a: Dirent, b: Dirent) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+
+function ripgrepFailure(error: Error & { code?: unknown }, stderr: string): AgentError {
+  if (error.code === 'ENOENT') return new AgentError('MISSING_DEPENDENCY', 'ripgrep (rg) is not installed on the computer running AgentGo.');
+  return new AgentError('SEARCH_FAILED', stderr.trim().slice(0, 2000) || error.message);
+}
+function listFiles(binary: string, args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile(binary, args, { cwd, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, timeout: 10000, env: agentEnvironment() }, (error, stdout, stderr) => {
-      if (error && error.code !== 1) reject(new AgentError('SEARCH_FAILED', stderr.trim().slice(0, 2000) || error.message));
+    execFile(binary, args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: SEARCH_TIMEOUT_MS, env: agentEnvironment() }, (error, stdout, stderr) => {
+      // ripgrep exits with 1 when nothing matched.
+      if (error && error.code !== 1) reject(ripgrepFailure(error, stderr));
       else resolve(stdout);
     });
-    child.stdin?.on('error', () => {});
-    child.stdin?.end(stdin);
   });
 }
+
 export class WorkspaceFiles {
-  private roots = new Map<string, string>();
+  private roots = new Map<string, { path: string; label: string }>();
   constructor(private readonly config: Config, private readonly stateDir: string) {}
   async prepare() {
     const state = await realpath(this.stateDir);
+    const roots = new Map<string, { path: string; label: string }>();
     for (const workspace of this.config.workspaces) {
-      const root = await realpath(workspace.path);
-      if (!(await lstat(root)).isDirectory() || contains(root, state) || contains(state, root)) throw new AgentError('INVALID_WORKSPACE', 'A workspace cannot contain, or be inside, the AgentGo state directory.');
-      if ([...this.roots.values()].some(other => contains(root, other) || contains(other, root))) throw new AgentError('INVALID_WORKSPACE', 'Workspaces cannot be inside each other.');
-      if (this.roots.has(workspace.id)) throw new AgentError('INVALID_WORKSPACE', 'Duplicate workspace ID.');
-      this.roots.set(workspace.id, root);
+      // A project that was deleted or moved drops out of the list instead of breaking every tool.
+      const root = await realpath(workspace.path).catch(() => undefined);
+      if (!root || !(await lstat(root)).isDirectory()) continue;
+      if (contains(root, state) || contains(state, root)) throw new AgentError('INVALID_WORKSPACE', 'A workspace cannot contain, or be inside, the AgentGo state directory.');
+      if ([...roots.values()].some(other => contains(root, other.path) || contains(other.path, root))) throw new AgentError('INVALID_WORKSPACE', 'Workspaces cannot be inside each other.');
+      if (roots.has(workspace.id)) throw new AgentError('INVALID_WORKSPACE', 'Duplicate workspace ID.');
+      roots.set(workspace.id, { path: root, label: workspace.label ?? workspace.id });
     }
+    for (const folder of this.config.folders) {
+      const base = await realpath(folder).catch(() => undefined);
+      const entries = base ? await readdir(base, { withFileTypes: true }).catch(() => []) : [];
+      for (const entry of entries.sort(byName)) {
+        const id = folderId(entry.name);
+        if (!entry.isDirectory() || entry.name.startsWith('.') || forbidden(entry.name) || !id || roots.has(id)) continue;
+        const root = join(base!, entry.name);
+        if ([...roots.values()].some(other => other.path === root) || contains(root, state) || contains(state, root)) continue;
+        roots.set(id, { path: root, label: entry.name });
+      }
+    }
+    this.roots = roots;
   }
-  list() { return { workspaces: this.config.workspaces.map(w => ({ id: w.id, label: w.label ?? w.id, approvalPolicy: 'auto-approval' })) }; }
+  /** Includes each workspace's full path, which the MCP tools don't reveal. */
+  all() { return [...this.roots].map(([id, root]) => ({ id, label: root.label, path: root.path })); }
+  list() {
+    const workspaces = [...this.roots].map(([id, root]) => ({ id, label: root.label }));
+    return workspaces.length ? { workspaces } : { workspaces, hint: workspacesHint };
+  }
   async resolve(workspaceId: string, path = '.', directory = false): Promise<string> {
-    const root = this.roots.get(workspaceId);
-    if (!root) throw new AgentError('WORKSPACE_NOT_FOUND', 'No workspace has this ID. Call listWorkspaces to see the IDs.');
+    const root = this.roots.get(workspaceId)?.path;
+    if (!root) throw new AgentError('WORKSPACE_NOT_FOUND', this.roots.size ? 'No workspace has this ID. Call listWorkspaces to see the IDs.' : workspacesHint);
     if (isAbsolute(path) || path.includes('\0') || path.includes('\\') || forbidden(path)) throw new AgentError('PATH_DENIED', 'Use a relative path inside the workspace. Secrets such as .env files and keys are blocked.');
     const full = resolve(root, path);
     if (!contains(root, full)) throw new AgentError('PATH_DENIED', 'That path is outside the workspace.');
@@ -53,7 +87,7 @@ export class WorkspaceFiles {
     const full = await this.resolve(workspaceId, path, true);
     const entries = (await readdir(full, { withFileTypes: true }))
       .filter(entry => !forbidden(entry.name) && entry.name > cursor)
-      .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+      .sort(byName);
     const selected = entries.slice(0, limit);
     const type = (entry: Dirent) => entry.isSymbolicLink() ? 'symlink' : entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other';
     return {
@@ -84,12 +118,20 @@ export class WorkspaceFiles {
     const content = selected.slice(0, 16000);
     return { path, startLine, content, totalLines: lines.length, truncated: selected.length > content.length || startLine - 1 + maxLines < lines.length };
   }
+  // ripgrep respects .gitignore (even outside a Git repo), skips hidden files and never follows symlinks.
+  private searchArgs(): string[] {
+    return [
+      '--no-require-git',
+      ...secretGlobs.flatMap(glob => ['--iglob', `!${glob}`]),
+      ...this.config.searchExclude.flatMap(name => ['--glob', `!${name}`]),
+    ];
+  }
   private async paths(workspaceId: string): Promise<string[]> {
     const cwd = await this.resolve(workspaceId, '.', true);
-    const output = await execute(this.config.rgPath, ['--files', '--null', '--no-require-git', '--', '.'], cwd);
-    const paths = output.split('\0').filter(Boolean).map(p => p.replace(/^\.\//, '')).filter(p => !forbidden(p)).sort();
-    if (paths.length > 20000) throw new AgentError('SEARCH_LIMIT', 'This workspace has more than 20,000 searchable files. Add a smaller folder as its own workspace.');
-    return paths;
+    const output = await listFiles(this.config.rgPath, ['--files', '--null', ...this.searchArgs(), '--', '.'], cwd);
+    const paths = output.split('\0').filter(Boolean).map(p => p.replace(/^\.\//, '')).filter(p => !forbidden(p));
+    if (paths.length > SEARCH_FILE_LIMIT) throw new AgentError('SEARCH_LIMIT', `This workspace has more than ${SEARCH_FILE_LIMIT.toLocaleString('en-US')} searchable files. Add a smaller folder as its own workspace, or exclude more folders with searchExclude.`);
+    return paths.sort();
   }
   async globFiles(workspaceId: string, pattern: string, cursor = '', limit = 100) {
     const paths = (await this.paths(workspaceId)).filter(path => path > cursor && matchesGlob(path, pattern));
@@ -101,34 +143,36 @@ export class WorkspaceFiles {
     return { files: files.slice(0, limit), nextCursor: files.length > limit ? files[limit - 1] : null };
   }
   async grepFiles(workspaceId: string, pattern: string, fileGlob = '**/*', literal = false, caseSensitive = true, limit = 100) {
-    const paths = (await this.paths(workspaceId)).filter(path => matchesGlob(path, fileGlob));
-    let combined = '';
-    let line = 1;
-    let bytes = 0;
-    let truncated = false;
-    const ranges: Array<{ path: string; first: number; last: number }> = [];
-    for (const path of paths) {
-      let content: string;
-      try { content = await this.text(workspaceId, path); } catch { continue; }
-      bytes += Buffer.byteLength(content);
-      if (bytes > 4 * 1024 * 1024) { truncated = true; break; }
-      if (!content.endsWith('\n')) content += '\n';
-      const count = content.split('\n').length - 1;
-      ranges.push({ path, first: line, last: line + count - 1 });
-      line += count; combined += content;
-    }
-    if (!combined) return { matches: [], truncated };
-    // rg only receives already-opened and checked text, never untrusted file paths.
-    const output = await execute(this.config.rgPath, ['--json', ...(literal ? ['--fixed-strings'] : []), ...(caseSensitive ? [] : ['--ignore-case']), '-e', pattern, '--'], await this.resolve(workspaceId, '.', true), combined);
+    const cwd = await this.resolve(workspaceId, '.', true);
+    // Sorting by path makes ripgrep single-threaded, but keeps results stable when they are cut off at the limit.
+    const args = ['--json', '--sort', 'path', '--max-filesize', '1M', ...this.searchArgs(),
+      ...(literal ? ['--fixed-strings'] : []), ...(caseSensitive ? [] : ['--ignore-case']), '-e', pattern, '--', '.'];
     const matches: Array<{ path: string; line: number; text: string }> = [];
-    for (const row of output.split('\n').filter(Boolean)) {
-      const entry = JSON.parse(row);
-      if (entry.type !== 'match') continue;
-      const range = ranges.find(range => entry.data.line_number >= range.first && entry.data.line_number <= range.last);
-      if (!range) continue;
-      if (matches.length >= limit) { truncated = true; break; }
-      matches.push({ path: range.path, line: entry.data.line_number - range.first + 1, text: String(entry.data.lines.text ?? '').slice(0, 500) });
-    }
+    let truncated = false;
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(this.config.rgPath, args, { cwd, env: agentEnvironment(), stdio: ['ignore', 'pipe', 'pipe'] });
+      const stop = () => { truncated = true; child.kill(); };
+      const timer = setTimeout(stop, SEARCH_TIMEOUT_MS);
+      let stderr = '';
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-4000); });
+      createInterface({ input: child.stdout }).on('line', line => {
+        if (truncated) return;
+        let entry;
+        try { entry = JSON.parse(line); } catch { return; }
+        if (entry.type !== 'match') return;
+        const path = String(entry.data.path?.text ?? '').replace(/^\.\//, '');
+        if (!path || forbidden(path) || !matchesGlob(path, fileGlob)) return;
+        if (matches.length >= limit) return stop();
+        matches.push({ path, line: entry.data.line_number, text: String(entry.data.lines?.text ?? '').replace(/\r?\n$/, '').slice(0, 500) });
+      });
+      child.once('error', error => { clearTimeout(timer); reject(ripgrepFailure(error, stderr)); });
+      child.once('close', code => {
+        clearTimeout(timer);
+        // Exit code 2 can also mean some files were unreadable while others matched.
+        if (code === 2 && !matches.length && !truncated) reject(ripgrepFailure(new Error('ripgrep failed.'), stderr));
+        else resolve();
+      });
+    });
     return { matches, truncated };
   }
 }

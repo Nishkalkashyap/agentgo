@@ -2,6 +2,11 @@ import type { Config } from './schema.js';
 import type { DaemonState } from './hosting-types.js';
 
 const field = (label: string, value: string | number) => `  ${`${label}:`.padEnd(17)} ${value}`;
+const setupHint = (command: string) => [
+  'No workspaces yet, so agents have nowhere to work. Add the folder your projects live in:',
+  `  ${command} workspace add-folder ~/code`,
+  'Every project inside it becomes a workspace, including ones you create later. No restart needed.',
+];
 
 function authentication(token: string): string[] {
   return [
@@ -12,13 +17,14 @@ function authentication(token: string): string[] {
   ];
 }
 
-export function formatConnection(result: { alreadyRunning: boolean; token: string; mcpConnectionURL?: string; tunnelStatus?: string }, command: string): string {
+export function formatConnection(result: { alreadyRunning: boolean; token: string; mcpConnectionURL?: string; tunnelStatus?: string }, command: string, workspaces: number): string {
   const lines = ['AgentGo', '', result.alreadyRunning ? 'Server is already running.' : 'Server started.', ''];
   if (result.mcpConnectionURL) lines.push(field('MCP URL', result.mcpConnectionURL));
   else lines.push(`Waiting for the tunnel to connect. Run ${command} status to see the URL once it's up.`);
   lines.push(field('Transport', 'Streamable HTTP'), ...authentication(result.token));
   if (result.tunnelStatus === 'disabled') lines.push('', 'Local access only; no Cloudflare tunnel is running.');
   else if (result.tunnelStatus !== 'connected') lines.push('', 'The tunnel is reconnecting. Runs in progress carry on.');
+  if (!workspaces) lines.push('', ...setupHint(command));
   lines.push('', `Check status: ${command} status`, `Stop server:  ${command} stop`);
   return lines.join('\n');
 }
@@ -41,19 +47,20 @@ export function formatToken(token: string): string {
   return ['New connection password created.', '', ...authentication(token), '', 'Update the header in your MCP client. The old password no longer works.'].join('\n');
 }
 
-export function formatWorkspaces(workspaces: Config['workspaces'], message?: string): string {
-  const lines = workspaces.length
-    ? ['Workspaces:', '', ...workspaces.map(w => `  ${w.id}${w.label ? ` (${w.label})` : ''}\n    ${w.path}`)]
-    : ['No workspaces yet. Add a project folder with: workspace add <id> <path>'];
-  if (message) lines.push('', message);
+export function formatWorkspaces(folders: string[], workspaces: Array<{ id: string; path: string }>, command: string): string {
+  const lines: string[] = [];
+  if (folders.length) lines.push('Project folders:', '', ...folders.map(folder => `  ${folder}`), '');
+  if (!workspaces.length) return [...lines, ...setupHint(command)].join('\n');
+  const width = Math.max(...workspaces.map(w => w.id.length));
+  lines.push(`Workspaces (${workspaces.length}):`, '', ...workspaces.map(w => `  ${w.id.padEnd(width)}  ${w.path}`));
   return lines.join('\n');
 }
 
 export function formatModels(models: Config['claudeModels']): string {
-  return ['Claude models:', '', ...models.map(model => `  ${model.id}\n    Effort: ${model.efforts.join(', ')}`), '', 'Restart the server to apply model changes.'].join('\n');
+  return ['Claude models:', '', ...models.map(model => `  ${model.id}\n    Effort: ${model.efforts.join(', ')}`)].join('\n');
 }
 
-export function formatConfig(config: Config): string {
+export function formatConfig(config: Config, workspaces: Array<{ id: string; path: string }>, command: string): string {
   return [
     'AgentGo settings', '',
     field('Codex CLI', config.codexPath), field('Claude CLI', config.claudePath), field('ripgrep', config.rgPath),
@@ -61,12 +68,13 @@ export function formatConfig(config: Config): string {
     field('Concurrent runs', config.maxConcurrentRuns), field('Queued runs', config.maxQueuedRuns),
     field('Max run time', `${config.maxRunSeconds} seconds`),
     field('Output limit', `${config.maxRunOutputBytes} bytes per run`), field('Keep output', `${config.retentionDays} days`),
-    '', formatWorkspaces(config.workspaces), '', formatModels(config.claudeModels),
+    field('Search skips', config.searchExclude.join(', ')),
+    '', formatWorkspaces(config.folders, workspaces, command), '', formatModels(config.claudeModels),
   ].join('\n');
 }
 
 type DoctorCheck = { provider?: string; dependency?: string; version?: string; authenticated?: boolean; available?: boolean; error?: { message: string } };
-export function formatDoctor(checks: DoctorCheck[], workspaces: number, stateDir: string): string {
+export function formatDoctor(checks: DoctorCheck[], workspaces: number, stateDir: string, command: string): string {
   const lines = ['AgentGo checks', ''];
   for (const check of checks) {
     const name = check.provider ?? check.dependency ?? 'Dependency';
@@ -74,5 +82,6 @@ export function formatDoctor(checks: DoctorCheck[], workspaces: number, stateDir
     lines.push(field(name, check.error ? `Not ready: ${check.error.message}` : `${check.version ?? 'Available'}${login}`));
   }
   lines.push('', field('Workspaces', workspaces), field('State directory', stateDir), field('Approval', 'Automatic for both agents'));
+  if (!workspaces) lines.push('', ...setupHint(command));
   return lines.join('\n');
 }

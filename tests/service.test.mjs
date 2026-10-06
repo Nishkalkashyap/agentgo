@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { writeFile, symlink, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporary, request, serviceFor, waitRun, waitFor } from './helpers.mjs';
+import { AgentService } from '../dist/service.js';
+import { WorkspaceFiles } from '../dist/filesystem.js';
+import { configSchema } from '../dist/schema.js';
+import { saveConfig } from '../dist/config.js';
 
 test('Codex runs, idempotency, cursor output, session continuation and fixed approval', async () => {
   const tmp = await temporary(); const service = await serviceFor(tmp);
@@ -49,8 +53,9 @@ test('Claude stream output, resume, unsupported tier and denied native policy', 
   } finally { await service.close(); await tmp.cleanup(); }
 });
 
-test('workspace serialization, cancellation, timeout and malformed provider output', async () => {
-  const tmp = await temporary(); const service = await serviceFor(tmp);
+test('queueing, cancellation, timeout and malformed provider output', async () => {
+  const tmp = await temporary(); tmp.config.maxConcurrentRuns = 1;
+  const service = await serviceFor(tmp);
   try {
     const first = await service.start(request({ prompt: 'hang' }));
     const second = await service.start(request({ idempotencyKey: 'second' }));
@@ -91,6 +96,8 @@ test('directory/read/glob/grep obey roots, sensitive exclusions, ignores, symlin
   await writeFile(join(tmp.workspace, '.env'), 'SECRET=needle');
   await writeFile(join(tmp.workspace, '.gitignore'), 'ignored.txt\n');
   await writeFile(join(tmp.workspace, 'ignored.txt'), 'needle ignored');
+  await mkdir(join(tmp.workspace, 'node_modules', 'pkg'), { recursive: true });
+  await writeFile(join(tmp.workspace, 'node_modules', 'pkg', 'index.ts'), 'needle in a dependency');
   await writeFile(join(tmp.root, 'outside.txt'), 'outside');
   await symlink(join(tmp.root, 'outside.txt'), join(tmp.workspace, 'link.txt'));
   const service = await serviceFor(tmp);
@@ -120,5 +127,32 @@ test('output limits fail the task, and retention keeps idempotency without retai
     assert.equal(service.store.run(run.taskId).input.prompt, '');
     assert.equal(service.store.session(run.sessionId).input.prompt, '');
     assert.equal((await service.start(request({ prompt: 'x'.repeat(5000) }))).taskId, run.taskId);
+  } finally { await service.close(); await tmp.cleanup(); }
+});
+
+test('project folders, live config reload, setup hint and parallel runs in one workspace', async () => {
+  const tmp = await temporary();
+  const projects = join(tmp.root, 'projects');
+  await mkdir(join(projects, 'alpha'), { recursive: true });
+  await mkdir(join(projects, '.hidden'));
+  await writeFile(join(projects, 'notes.txt'), 'not a project');
+  const empty = new WorkspaceFiles(configSchema.parse({}), tmp.stateDir);
+  await empty.prepare();
+  assert.match(empty.list().hint, /workspace add-folder/);
+  await saveConfig(tmp.stateDir, { ...tmp.config, workspaces: [], folders: [projects] });
+  const service = await AgentService.create({ stateDir: tmp.stateDir });
+  const ids = () => service.files.list().workspaces.map(w => w.id);
+  try {
+    assert.deepEqual(ids(), ['alpha']);
+    await mkdir(join(projects, 'My App'));
+    await service.refresh();
+    assert.deepEqual(ids(), ['My-App', 'alpha']);
+    await saveConfig(tmp.stateDir, { ...tmp.config, folders: [projects] });
+    await service.refresh();
+    assert.deepEqual(ids(), ['project', 'My-App', 'alpha']);
+    const first = await service.start(request({ workspaceId: 'alpha', prompt: 'hang', idempotencyKey: 'first' }));
+    const second = await service.start(request({ workspaceId: 'alpha', prompt: 'hang', idempotencyKey: 'second' }));
+    await waitFor(() => [first, second].map(run => service.status(run.taskId).status), states => states.every(state => state === 'running'));
+    for (const run of [first, second]) { service.cancel(run.taskId); assert.equal((await waitRun(service, run.taskId)).status, 'cancelled'); }
   } finally { await service.close(); await tmp.cleanup(); }
 });

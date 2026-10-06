@@ -52,12 +52,25 @@ thing; this README uses `agentgo`.
 `doctor` shows whether `codex`, `claude`, `rg` and `cloudflared` are installed
 and whether you're logged in to each agent.
 
-Next, tell AgentGo which projects agents may work in. Each one gets a short ID
-that the assistant uses to refer to it:
+Next, tell AgentGo where your projects are. Point it at the folder they live
+in, and every folder inside it becomes a *workspace* that agents can work in:
 
 ```sh
-agentgo workspace add my-app ~/code/my-app
+agentgo workspace add-folder ~/code
 ```
+
+Each workspace is named after its folder, so `~/code/my-app` becomes `my-app`
+(spaces and other odd characters turn into dashes). Projects you create later
+show up on their own, and hidden folders are skipped. To add a single project
+that lives somewhere else, give it a name yourself:
+
+```sh
+agentgo workspace add notes ~/Documents/notes
+```
+
+`agentgo workspace list` shows what agents can see, and
+`agentgo workspace remove <name or folder>` takes something away. Changes apply
+straight away, even while the server is running.
 
 Then start the server:
 
@@ -93,9 +106,10 @@ agentgo stop
 agentgo restart
 ```
 
-Workspaces and settings are read when the server starts, so restart it after
-changing them. Stopping the server interrupts any runs in progress. Edits they
-already made stay, but nothing is undone or resumed automatically.
+You don't need to restart after changing workspaces, models or settings; the
+server picks up changes on the next request. Stopping the server interrupts
+any runs in progress. Edits they already made stay, but nothing is undone or
+resumed automatically.
 
 If the server won't start, its log is at `~/.agentgo/daemon.log`.
 
@@ -218,15 +232,20 @@ A few things worth knowing:
   and refuse secrets such as `.env`, `.ssh`, `.aws`, `.git`, `.npmrc` and
   private keys. Agents are only held back by their own sandbox and reviewer,
   so they can read and run whatever those allow.
+- **Search skips dependencies and build output.** `globFiles` and `grepFiles`
+  search one workspace at a time, up to 100,000 files. They follow
+  `.gitignore`, skip hidden files, and skip folders such as `node_modules`,
+  `vendor`, `dist`, `build`, `target`, `.venv` and `__pycache__` wherever they
+  appear. `listDirectory` and `readFile` can still open those.
 - **Models aren't guessed.** The assistant should call `getSupportedModels`
   first. Codex reports its own list. For Claude, AgentGo starts with the
   `sonnet` and `opus` aliases at low, medium and high effort; add others with
   `agentgo model add claude-sonnet-5-5 --efforts low,medium,high,xhigh,max`.
   An unknown model, effort or tier is an error, never silently swapped. Leave
   out `serviceTier` for Claude.
-- **One run per workspace at a time.** Runs in the same workspace queue up so
-  two agents never edit the same files at once. Different workspaces run side
-  by side, two at a time by default.
+- **Up to five runs at once.** They can be in different workspaces or the
+  same one. Agents in the same workspace don't know about each other, so give
+  parallel runs separate parts of the code. Extra runs wait in a queue.
 - **Retries won't start a second run.** Each run carries an `idempotencyKey`.
   If the assistant retries with the same key and arguments, it gets the
   original run back. Reusing a key with different arguments is an error.
@@ -267,11 +286,12 @@ password is never passed to them.
 
 | Setting | Default | What it controls |
 | --- | --- | --- |
-| `maxConcurrentRuns` | 2 | Runs that can go at once, across workspaces |
+| `maxConcurrentRuns` | 5 | Runs that can go at once (up to 8) |
 | `maxQueuedRuns` | 100 | Runs that can wait in the queue |
 | `maxRunSeconds` | 3600 | The longest time limit a run can ask for |
 | `maxRunOutputBytes` | 10 MiB | Output a run can produce before it's stopped |
 | `retentionDays` | 30 | How long prompts and output are kept |
+| `searchExclude` | `node_modules`, `dist`, … | Folder and file names search skips (`config show` lists them all) |
 | `codexPath`, `claudePath`, `rgPath` | `codex`, `claude`, `rg` | Where to find each program |
 
 ## Using it as a library

@@ -9,23 +9,30 @@ import { AgentError, failureOf } from './errors.js';
 import { privateDirectory, readJson, writeJson, withLock, processExists, delay } from './storage.js';
 import { loadConfig } from './config.js';
 
+const configStamp = (directory: string) => stat(join(directory, 'config.json')).then(info => info.mtimeMs, () => 0);
+
 export type ServiceOptions = { stateDir: string; config?: Config; providers?: Record<Provider, AgentProvider> };
 export class AgentService {
-  readonly files: WorkspaceFiles;
+  files: WorkspaceFiles;
+  config: Config;
+  providers: Record<Provider, AgentProvider>;
   readonly store: RunStore;
-  readonly providers: Record<Provider, AgentProvider>;
+  private configStamp?: number;
+  private refreshing?: Promise<void>;
   private readonly active = new Map<string, { run: Run; controller: AbortController; promise: Promise<void> }>();
   private closing = false;
   private closePromise?: Promise<void>;
   private pumping = false;
   private timer: NodeJS.Timeout;
-  private constructor(readonly directory: string, readonly config: Config, private readonly lockId: string, files: WorkspaceFiles, providers?: Record<Provider, AgentProvider>) {
+  private constructor(readonly directory: string, config: Config, private readonly lockId: string, files: WorkspaceFiles,
+    private readonly fixedConfig: boolean, private readonly fixedProviders?: Record<Provider, AgentProvider>) {
+    this.config = config;
     this.files = files;
-    this.providers = providers ?? createProviders(config);
+    this.providers = fixedProviders ?? createProviders(config);
     this.store = new RunStore(directory);
     this.store.recover();
     this.store.prune(config.retentionDays);
-    this.timer = setInterval(() => { this.store.prune(config.retentionDays); }, 3600_000);
+    this.timer = setInterval(() => { this.store.prune(this.config.retentionDays); }, 3600_000);
     this.timer.unref();
   }
   static async create(options: ServiceOptions): Promise<AgentService> {
@@ -47,11 +54,34 @@ export class AgentService {
       await writeJson(join(lock, 'owner.json'), { pid: process.pid, lockId });
     });
     try {
+      const stamp = await configStamp(options.stateDir);
       const config = configSchema.parse(options.config ?? await loadConfig(options.stateDir));
       const files = new WorkspaceFiles(config, options.stateDir);
       await files.prepare();
-      return new AgentService(options.stateDir, config, lockId, files, options.providers);
+      const service = new AgentService(options.stateDir, config, lockId, files, Boolean(options.config), options.providers);
+      service.configStamp = stamp;
+      return service;
     } catch (error) { await rm(lock, { recursive: true, force: true }); throw error; }
+  }
+  /** Picks up config.json edits and new project folders without a restart. Runs already started are unaffected. */
+  refresh(): Promise<void> {
+    return this.refreshing ??= this.reload().finally(() => { this.refreshing = undefined; });
+  }
+  private async reload() {
+    const stamp = await configStamp(this.directory);
+    if (!this.fixedConfig && stamp !== this.configStamp) {
+      const config = await loadConfig(this.directory);
+      const files = new WorkspaceFiles(config, this.directory);
+      await files.prepare();
+      const changed = (['codexPath', 'claudePath', 'claudeModels'] as const).some(key => JSON.stringify(config[key]) !== JSON.stringify(this.config[key]));
+      if (changed && !this.fixedProviders) this.providers = createProviders(config);
+      this.config = config; this.files = files; this.configStamp = stamp;
+      this.pump();
+      return;
+    }
+    const files = new WorkspaceFiles(this.config, this.directory);
+    await files.prepare();
+    this.files = files;
   }
   async capabilities(provider?: Provider) {
     const providers = await Promise.all((provider ? [provider] : ['codex', 'claude'] as const).map(async name => {
@@ -134,7 +164,7 @@ export class AgentService {
     try {
       for (const run of this.store.active()) {
         if (this.active.size >= this.config.maxConcurrentRuns) break;
-        if (run.status !== 'queued' || [...this.active.values()].some(a => a.run.input.workspaceId === run.input.workspaceId)) continue;
+        if (run.status !== 'queued') continue;
         const controller = new AbortController();
         run.status = 'starting'; run.startedAt = new Date().toISOString(); this.store.save(run);
         const entry = { run, controller, promise: Promise.resolve() };

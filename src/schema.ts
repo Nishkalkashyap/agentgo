@@ -17,12 +17,19 @@ export type ContinueInput = z.infer<typeof continueSchema>;
 export const modelSchema = z.object({ id: identifier, displayName: z.string().optional(), efforts: z.array(identifier).min(1), serviceTiers: z.array(identifier).default([]) }).strict();
 export const configSchema = z.object({
   workspaces: z.array(z.object({ id: identifier, path: z.string().min(1), label: z.string().optional() }).strict()).default([]),
+  // Every folder directly inside one of these is a workspace, found fresh on each request.
+  folders: z.array(z.string().min(1)).default([]),
+  // Folder and file names that globFiles and grepFiles skip anywhere in a workspace.
+  searchExclude: z.array(z.string().min(1)).default([
+    'node_modules', 'bower_components', 'vendor', 'dist', 'build', 'target', 'coverage', '.next', '.nuxt', '.svelte-kit',
+    '.turbo', '.cache', '.venv', 'venv', '__pycache__', '.tox', '.gradle', 'Pods', 'DerivedData',
+  ]),
   codexPath: z.string().min(1).default('codex'), claudePath: z.string().min(1).default('claude'), rgPath: z.string().min(1).default('rg'),
   claudeModels: z.array(modelSchema).default([
     { id: 'sonnet', displayName: 'Claude Sonnet (CLI alias)', efforts: ['low', 'medium', 'high'], serviceTiers: [] },
     { id: 'opus', displayName: 'Claude Opus (CLI alias)', efforts: ['low', 'medium', 'high'], serviceTiers: [] },
   ]),
-  maxConcurrentRuns: z.number().int().min(1).max(8).default(2),
+  maxConcurrentRuns: z.number().int().min(1).max(8).default(5),
   maxQueuedRuns: z.number().int().min(1).max(1000).default(100),
   maxRunSeconds: z.number().int().min(1).max(86400).default(3600),
   maxRunOutputBytes: z.number().int().min(1024).max(100 * 1024 * 1024).default(10 * 1024 * 1024),
