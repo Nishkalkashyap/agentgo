@@ -1,5 +1,5 @@
 {
-  "name": "agentgo",
+  "name": "agentgo-mcp",
   "version": "0.1.0",
   "description": "Run Codex and Claude Code on your computer from a remote MCP client",
   "repository": { "type": "git", "url": "git+https://github.com/Nishkalkashyap/agentgo.git" },
@@ -7,7 +7,7 @@
   "license": "MIT",
   "engines": { "node": ">=24.13.0" },
   "os": ["darwin", "linux"],
-  "bin": { "agentgo": "dist/cli.js" },
+  "bin": { "agentgo": "dist/cli.js", "agentgo-mcp": "dist/cli.js" },
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "files": ["dist", "README.md", "LICENSE", "NOTICE"],
   "scripts": {

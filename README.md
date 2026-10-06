@@ -42,9 +42,12 @@ answer to that.
 Install the CLI and check that everything it needs is there:
 
 ```sh
-npm install -g agentgo
+npm install -g agentgo-mcp
 agentgo doctor
 ```
+
+This installs two commands, `agentgo` and `agentgo-mcp`. They're the same
+thing; this README uses `agentgo`.
 
 `doctor` shows whether `codex`, `claude`, `rg` and `cloudflared` are installed
 and whether you're logged in to each agent.
@@ -274,13 +277,13 @@ password is never passed to them.
 ## Using it as a library
 
 ```sh
-npm install agentgo
+npm install agentgo-mcp
 ```
 
 `connectAgent` gives you a typed client for a running AgentGo server:
 
 ```ts
-import { connectAgent } from 'agentgo';
+import { connectAgent } from 'agentgo-mcp';
 
 const agent = await connectAgent({
   mcpConnectionURL: process.env.AGENTGO_URL!,
